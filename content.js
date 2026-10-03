@@ -3,7 +3,7 @@
   if (window.__VFL_ASSISTANT_V05__) return;
   window.__VFL_ASSISTANT_V05__ = true;
 
-  const VERSION = "0.5.6";
+  const VERSION = "0.5.7";
   const ORIGIN = location.origin;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -481,7 +481,54 @@
     return new Map((roster?.players || []).map(p => [String(p.id), p]));
   }
 
-  function parsePlayerInfo(doc, url, playerId) {
+  // Confirmed player.php table: 16 columns, current selected season only.
+  function parseRecentPlayerMatches(doc, url, maxMatches = 10, teamId = null) {
+    const matches = [];
+    for (const table of sanitizedRoot(doc).querySelectorAll('table')) {
+      const rows = directTableRows(table);
+      const header = rows.find(r => r.children.length === 16 && r.children[6].getAttribute('title') === 'Позиция' && r.children[15].getAttribute('title') === 'Сыграл минут');
+      if (!header) continue;
+      const goalsAreScored = header.children[11].getAttribute('title') === 'Голы';
+      for (const row of rows) {
+        const c = [...row.children];
+        if (c.length !== 16) continue;
+        const link = [...c[3].querySelectorAll('a[href]')].find(a => {
+          const href = absUrl(a.getAttribute('href'), url);
+          return href && new URL(href).origin === ORIGIN && new URL(href).pathname === '/viewmatch.php';
+        });
+        if (!link) continue;
+        const matchUrl = absUrl(link.getAttribute('href'), url);
+        const teams = [...c[1].querySelectorAll('a[href]')].map(a => {
+          const href = absUrl(a.getAttribute('href'), url);
+          const parsed = href ? new URL(href) : null;
+          return { name: clean(domText(a)), id: parsed?.pathname === '/roster.php' ? parsed.searchParams.get('num') : parsed?.pathname === '/managerzone.php' ? String(teamId || '') : null };
+        }).filter(t => t.id);
+        const ownIndex = teamId == null ? -1 : teams.findIndex(t => t.id === String(teamId));
+        const opponent = teams.length === 2 && ownIndex >= 0 ? teams[1 - ownIndex] : null;
+        const value = i => clean(domText(c[i]));
+        const minutes = clubNumber(value(15));
+        const played = minutes != null && minutes > 0;
+        const event = i => value(i) === '-' && played ? 0 : clubNumber(value(i));
+        const icons = [...c[12].querySelectorAll('img')];
+        const cardTitles = icons.map(i => i.getAttribute('title') || '');
+        const knownCards = cardTitles.every(t => /^(Желтая карточка|Красная карточка)$/.test(t));
+        const emptyCards = !value(12) && icons.length === 0;
+        const cardCount = title => played && knownCards && (icons.length > 0 || emptyCards) ? cardTitles.filter(t => t === title).length : null;
+        matches.push({
+          date: value(0) || null, competition: value(4) || null,
+          opponent: opponent?.name || null, opponentId: opponent?.id || null,
+          homeAway: opponent ? (ownIndex === 0 ? 'home' : 'away') : null,
+          score: /^\d+\s*:\s*\d+$/.test(clean(domText(link))) ? clean(domText(link)) : null, position: value(6) === '-' ? null : value(6) || null,
+          minutes, rating: clubNumber(value(14)), goals: goalsAreScored ? event(11) : null,
+          assists: event(10), yellowCards: cardCount('Желтая карточка'), redCards: cardCount('Красная карточка'),
+          playerStrength: clubNumber(value(7)), matchUrl
+        });
+      }
+    }
+    return uniq(matches, m => m.matchUrl).sort((a,b) => (clubNumber(param(b.matchUrl, 'day')) || 0) - (clubNumber(param(a.matchUrl, 'day')) || 0)).slice(0, Math.max(0, maxMatches));
+  }
+
+  function parsePlayerInfo(doc, url, playerId, maxMatches = 10, teamId = null) {
     const text = safeBodyText(doc, 18000);
 
     const usefulness = (() => {
@@ -519,6 +566,7 @@
     return {
       playerId: String(playerId),
       url,
+      recentMatches: parseRecentPlayerMatches(doc, url, maxMatches, teamId),
       fatigue: cellNumber(doc, "Усталость"),
       form: textNumber(formTitle, /(\d+)%/),
       formTrend: /раст[её]т/i.test(formTitle) ? "rising" : /падает/i.test(formTitle) ? "falling" : null,
@@ -576,25 +624,60 @@
   }
 
   function parsePlayerContract(doc, url, playerId) {
-    const text = safeBodyText(doc, 18000);
-    const proposalText = text.match(/в контракте на [\s\S]*?точно устроит зарплата\s*[\d ]+\s*за тур/i)?.[0] || "";
-    const proposalSalary = textNumber(proposalText, /точно устроит зарплата\s*([\d ]+)\s*за тур/i);
-    const proposalSeasons = textNumber(proposalText, /в контракте на\s*(\d+)\s*следующ/i);
-
+    const root = sanitizedRoot(doc);
+    const text = safeBodyText(doc, 30000);
+    const proposal = text.match(/в контракте на [\s\S]*?точно устроит зарплата\s*[\d ]+\s*за тур/i)?.[0] || '';
+    const history = [];
+    for (const table of root.querySelectorAll('table')) {
+      const rows = directTableRows(table);
+      if (!rows.some(r => r.children.length === 5 && clean(domText(r.children[0])) === 'Дата подписания' && clean(domText(r.children[3])) === 'Дата окончания')) continue;
+      for (const row of rows) {
+        const c = [...row.children];
+        if (c.length !== 9 || !/^Сезон:/.test(c[0].getAttribute('title') || '') || !/^День:/.test(c[1].getAttribute('title') || '')) continue;
+        const val = i => clean(domText(c[i])) || null;
+        history.push({ signedSeason: clubNumber(val(0)), signedDay: clubNumber(val(1)), signedAt: val(2), team: val(3), term: val(4), endsAt: val(7), salaryPerTour: clubNumber(val(8)) });
+      }
+    }
+    const factors = [];
+    for (const fieldset of root.querySelectorAll('fieldset')) {
+      for (const row of fieldset.children) {
+        if (row.tagName !== 'DIV') continue;
+        const percentNode = row.children[0];
+        const raw = clean(domText(percentNode));
+        if (!/^[+-]\d+(?:[.,]\d+)?%$/.test(raw)) continue;
+        const clone = row.cloneNode(true);
+        clone.children[0].remove();
+        const label = clean(domText(clone)).replace(/:$/, '');
+        if (label) factors.push({ label, percent: clubNumber(raw) });
+      }
+    }
+    const adjustment = text.match(/Итого:\s*требования игрока\s*(меньше|больше) базовых на\s*(\d+(?:[.,]\d+)?)\s*%/i);
+    const current = {
+      team: clean(domText(cellValue(root, 'Команда'))) || null,
+      manager: clean(domText(cellValue(root, 'Менеджер, заключивший контракт'))) || null,
+      signedSeason: cellNumber(root, 'Сезон подписания контракта'),
+      signedDay: cellNumber(root, 'День подписания'),
+      signedAt: clean(domText(cellValue(root, 'Дата подписания'))) || null,
+      term: clean(domText(cellValue(root, 'Срок'))) || null,
+      salaryPerTour: cellNumber(root, 'Зарплата'),
+      endsAt: null
+    };
+    // An end date is available in the matching displayed historical signing.
+    current.endsAt = history.find(h => h.signedSeason === current.signedSeason && h.signedDay === current.signedDay && h.signedAt === current.signedAt && h.team === current.team)?.endsAt || null;
     return {
-      playerId: String(playerId),
-      url,
-      team: textValue(text, /Действующий контракт[\s\S]*?Команда:\s*([^\n\t]+)/i),
-      manager: clean(domText(cellValue(doc, "Менеджер, заключивший контракт"))) || null,
-      signedSeason: cellNumber(doc, "Сезон подписания контракта"),
-      term: clean(domText(cellValue(doc, "Срок"))) || null,
-      salary: cellNumber(doc, "Зарплата"),
-      acceptableSalaryNextSeason: proposalSeasons === 1 ? proposalSalary : null,
-      acceptableSalaryProposal: proposalSalary == null ? null : { salaryPerTour: proposalSalary, followingSeasons: proposalSeasons }
+      playerId: String(playerId), url, current,
+      renewal: {
+        requestedSalaryPerTour: clubNumber(clean(domText(root.querySelector('#hgreen')))) ?? textNumber(proposal, /точно устроит зарплата\s*([\d ]+)\s*за тур/i),
+        availableTerm: clean(domText(root.querySelector('#sdescr'))) || textValue(proposal, /в контракте на\s*(.*?)\s*\(/i),
+        baseSalaryNextSeason: cellNumber(root, 'Базовая зарплата следующего сезона'),
+        adjustmentPercent: adjustment ? Number(adjustment[2].replace(',', '.')) * (adjustment[1].toLowerCase() === 'меньше' ? -1 : 1) : null,
+        factors
+      },
+      history
     };
   }
 
-  function mergePlayerDetails(rosterPlayer, info, stats, contract) {
+  function mergePlayerDetails(rosterPlayer, info, stats, contract, mode = "own") {
     return {
       playerId: String(rosterPlayer?.id || info?.playerId || stats?.playerId || contract?.playerId || ""),
       name: rosterPlayer?.name ?? null,
@@ -602,19 +685,18 @@
       position: rosterPlayer?.position ?? null,
       age: rosterPlayer?.age ?? null,
       strength: rosterPlayer?.strength ?? null,
-      fatigue: info?.fatigue ?? rosterPlayer?.fatigue ?? null,
-      form: info?.form ?? rosterPlayer?.form ?? null,
-      formTrend: info?.formTrend ?? rosterPlayer?.formTrend ?? null,
-      realStrength: info?.realStrength ?? rosterPlayer?.realStrength ?? null,
+      fatigue: rosterPlayer?.fatigue ?? null,
+      form: rosterPlayer?.form ?? null,
+      formTrend: rosterPlayer?.formTrend ?? null,
+      realStrength: rosterPlayer?.realStrength ?? null,
       specials: rosterPlayer?.specials ?? [],
       selectedStats: rosterPlayer?.selectedStats ?? null,
       info: info || null,
-      stats: stats ? { ...stats, seasonMinutes: info?.seasonMinutes ?? null } : null,
-      contract: contract || null
+      ...(mode === "own" ? { stats: stats ? { ...stats, seasonMinutes: info?.seasonMinutes ?? null } : null, contract: contract || null } : {})
     };
   }
 
-  async function deepPlayerScan(roster, progressLabel, baseUrlBuilder) {
+  async function deepPlayerScan(roster, progressLabel, baseUrlBuilder, { mode = "own", maxMatches = 10, teamId = null } = {}) {
     const ids = roster?.playerIds || [];
     const rmap = rosterPlayerMap(roster);
     const out = [];
@@ -630,9 +712,9 @@
       try {
         const url = baseUrlBuilder(id);
         const infoDoc = await fetchDoc(url);
-        info = parsePlayerInfo(infoDoc, url, id);
+        info = parsePlayerInfo(infoDoc, url, id, maxMatches, teamId);
 
-        const tabs = detectPlayerTabLinks(infoDoc, id, url);
+        const tabs = mode === "own" ? detectPlayerTabLinks(infoDoc, id, url) : {};
 
         if (tabs.stats && tabs.stats !== url) {
           try {
@@ -657,7 +739,7 @@
         info = { playerId: id, error: String(e) };
       }
 
-      out.push(mergePlayerDetails(rmap.get(id), info, stats, contract));
+      out.push(mergePlayerDetails(rmap.get(id), info, stats, contract, mode));
       await sleep(120);
     }
 
@@ -851,7 +933,8 @@
       result.playerDetails = await deepPlayerScan(
         roster,
         "Игроки нашей команды",
-        id => `${ORIGIN}/player.php?num=${encodeURIComponent(id)}`
+        id => `${ORIGIN}/player.php?num=${encodeURIComponent(id)}`,
+        { mode: "own", maxMatches, teamId }
       );
     }
 
@@ -899,7 +982,8 @@
       result.playerDetails = await deepPlayerScan(
         roster,
         "Игроки соперника",
-        id => `${ORIGIN}/player.php?num=${encodeURIComponent(id)}`
+        id => `${ORIGIN}/player.php?num=${encodeURIComponent(id)}`,
+        { mode: "opponent", maxMatches, teamId: opponentId }
       );
     }
 
@@ -1001,7 +1085,7 @@
 
       <div id="vfl-assistant-status">Открой managerzone.php</div>
       <div class="vfl-assistant-note">
-        Deep дополнительно открывает страницы игроков и найденные вкладки статистики/контракта.
+        Deep: свои игроки — профиль, статистика и контракт; соперник — только профиль. Последние матчи игроков ограничены выбранным числом.
         Экспорт компактнее: без полного body/tables и без script/style.
       </div>
     </div>
