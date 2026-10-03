@@ -3,7 +3,7 @@
   if (window.__VFL_ASSISTANT_V05__) return;
   window.__VFL_ASSISTANT_V05__ = true;
 
-  const VERSION = "0.5.4";
+  const VERSION = "0.5.5";
   const ORIGIN = location.origin;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -137,12 +137,16 @@
     const financeRaw = text.match(/Финансы:\s*([\d\s]+)/i)?.[1];
     const name = [...doc.querySelectorAll(".tmhd")].map(x => clean(domText(x))).find(Boolean) || null;
 
+    const counter = regex => {
+      const match = text.match(regex);
+      return match ? Number(match[1]) : null;
+    };
     const scout = {
-      styles: Number(text.match(/осталось\s+(\d+)\s+изучен\S*\s+стил/i)?.[1] || 0) || null,
-      growth: Number(text.match(/(\d+)\s+роста силы/i)?.[1] || 0) || null,
-      decline: Number(text.match(/(\d+)\s+падения силы/i)?.[1] || 0) || null,
-      injury: Number(text.match(/(\d+)\s+травматичност/i)?.[1] || 0) || null,
-      loyalty: Number(text.match(/(\d+)\s+лояльност/i)?.[1] || 0) || null
+      styles: counter(/(\d+)\s+изучен\S*\s+стил/i),
+      growth: counter(/(\d+)\s+роста силы/i),
+      decline: counter(/(\d+)\s+падения силы/i),
+      injury: counter(/(\d+)\s+травматичност/i),
+      loyalty: counter(/(\d+)\s+лояльност/i)
     };
 
     return {
@@ -302,7 +306,7 @@
         formTrend: Number(args[13]) > 0 ? ({1: "rising", 2: "falling"}[args[14]] || null) : null,
         realStrength: Number.isFinite(Number(args[15])) ? Number(args[15]) : null,
         specials: [args[16], args[17], args[18], args[19]].filter(Boolean).map(String),
-        stats: Number(args[52]) >= 0 && args.length > 57 ? {
+        selectedStats: Number(args[52]) >= 0 && args.length > 57 ? {
           scope: rosterScope(doc),
           averageRating: Number(args[57]), games: Number(args[52]),
           goals: Number(args[53]), assists: Number(args[54]),
@@ -320,14 +324,13 @@
         .map(a => param(absUrl(a.getAttribute("href")), "num"))
         .filter(Boolean)
     );
-    if (fromLinks.length) return fromLinks;
-
-    return extractJPlayers(doc, expectedTeamId).map(p => p.id);
+    const players = extractJPlayers(doc, expectedTeamId);
+    return players.length ? uniq(players.map(p => p.id).filter(Boolean)) : fromLinks;
   }
 
   function rosterCompact(doc, expectedTeamId = null) {
     const scriptPlayers = extractJPlayers(doc, expectedTeamId);
-    const ids = playerIds(doc, expectedTeamId);
+    const ids = scriptPlayers.length ? uniq(scriptPlayers.map(p => p.id).filter(Boolean)) : playerIds(doc, expectedTeamId);
     const table = findPlayerTable(doc);
 
     if (!table) {
@@ -562,14 +565,22 @@
       const cells = [...row.children];
       const n = i => {
         const raw = clean(domText(cells[i])).replace(/\s/g, "").replace(",", ".");
-        return raw === "-" ? 0 : /^\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : null;
+        return raw === "-" && i !== 2 ? 0 : /^\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : null;
       };
       return { averageRating: n(2), games: n(3), goals: n(4), assists: n(5),
         yellowCards: n(8), redCards: n(9) };
     }
     const total = rowStats(doc.querySelector('tr[data-role="total"]'));
+    function tournamentName(cell) {
+      const label = cell.cloneNode(true);
+      // VFL adds a floating promotion/card counter beside the tournament title.
+      label.querySelectorAll('div.txt2').forEach(n => {
+        if (/float\s*:\s*right/i.test(n.getAttribute('style') || '') && /^\d+$/.test(clean(domText(n)))) n.remove();
+      });
+      return clean(domText(label));
+    }
     const tournaments = [...doc.querySelectorAll('tr[data-role="mt"]')].map(row => ({
-      tournament: clean(domText(row.children[1])), tournamentId: row.getAttribute('data-mt'),
+      tournament: tournamentName(row.children[1]), tournamentId: row.getAttribute('data-mt'),
       group: row.getAttribute('data-group'), ...rowStats(row)
     }));
     return {
@@ -615,7 +626,7 @@
       formTrend: info?.formTrend ?? rosterPlayer?.formTrend ?? null,
       realStrength: info?.realStrength ?? rosterPlayer?.realStrength ?? null,
       specials: rosterPlayer?.specials ?? [],
-      rosterStats: rosterPlayer?.stats ?? null,
+      selectedStats: rosterPlayer?.selectedStats ?? null,
       info: info || null,
       stats: stats ? { ...stats, seasonMinutes: info?.seasonMinutes ?? null } : null,
       contract: contract || null
@@ -689,7 +700,7 @@
     if (teamIdFromManager(currentDoc) !== teamId) throw new Error("Активная команда изменилась во время сбора. Повторите сбор.");
     const roster = rosterCompact(currentDoc, teamId);
     const selectedMap = rosterPlayerMap(displayedRoster);
-    roster.players = roster.players.map(p => ({ ...p, stats: selectedMap.get(p.id)?.stats ?? p.stats }));
+    roster.players = roster.players.map(p => ({ ...p, selectedStats: selectedMap.get(p.id)?.selectedStats ?? p.selectedStats }));
     roster.currentStateSourceUrl = currentUrl;
     roster.selectedStatsScope = rosterScope(document);
 
