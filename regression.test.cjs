@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(__dirname + '/content.js', 'utf8');
-const exposed = source.slice(0, source.indexOf('  const panel =')) + '\n window.test = {extractJPlayers,parseRecentPlayerMatches,parsePlayerInfo,parsePlayerStats,parsePlayerContract,mergePlayerDetails,domText,collectLinks,rosterCompact,playerIds,parseManagerCore,deepPlayerScan,collectOwnTeam,collectOpponent,pickMatches,safeBodyText,clubNumber,parseClubFinances,parseClubDeals,parseTeamStatistics,collectClubData, mockCollectors: (display,current,opponent,profile,clubDocs={},requests=[]) => { document=display; setStatus=()=>{}; nearestOpponentRosterUrl=()=>ORIGIN+"/roster.php?num=12345"; fetchDoc=async url=>{requests.push(url);return clubDocs[new URL(url).searchParams.get("pm")] || (/player_(stats|contracts)\.php/.test(url)?clubDocs[new URL(url).pathname]:url.includes("player.php")?profile:url.includes("sort=300")?current:url.includes("roster.php")?opponent:display);}; fetchMatches=async()=>[]; }, mockDeep: (fixture,requests) => { setStatus = () => {}; fetchDoc = async url => { requests.push(url); return fixture; }; }};})();';
+const exposed = source.slice(0, source.indexOf('  const panel =')) + '\n window.test = {extractJPlayers,parseRecentPlayerMatches,parsePlayerInfo,parsePlayerStats,parsePlayerContract,mergePlayerDetails,domText,collectLinks,rosterCompact,playerIds,parseManagerCore,deepPlayerScan,collectOwnTeam,collectOpponent,pickMatches,safeBodyText,clubNumber,parseClubFinances,parseClubDeals,parseTeamStatistics,collectClubData,parseTrainingCenter,parseTrainingHistory,parseScoutingCenter,parseScoutingHistory,parseFitnessCenter,parseFitnessHistory,collectManagement,managementForm, mockCollectors: (display,current,opponent,profile,clubDocs={},requests=[]) => { document=display; setStatus=()=>{}; nearestOpponentRosterUrl=()=>ORIGIN+"/roster.php?num=12345"; fetchDoc=async url=>{requests.push(url);return clubDocs[new URL(url).pathname+"?page="+new URL(url).searchParams.get("page")] || clubDocs[new URL(url).pathname] || clubDocs[new URL(url).searchParams.get("pm")] || (/player_(stats|contracts)\.php/.test(url)?clubDocs[new URL(url).pathname]:url.includes("player.php")?profile:url.includes("sort=300")?current:url.includes("roster.php")?opponent:display);}; fetchMatches=async()=>[]; }, mockDeep: (fixture,requests) => { setStatus = () => {}; fetchDoc = async url => { requests.push(url); return fixture; }; }};})();';
 const context = {window:{}, location:{origin:'https://vfliga.com',href:'https://vfliga.com/managerzone.php',pathname:'/managerzone.php'}, URL, Map, Set};
 vm.runInNewContext(exposed, context);
 const t = context.window.test;
@@ -28,7 +28,7 @@ function node(tag, value='', attrs={}, children=[]) {
         if(s==='select[name="season"]')return c.tagName==='SELECT'&&c.attrs.name==='season';
         if(s==='select option')return c.tagName==='OPTION';
         if(s==='div.txt2')return c.tagName==='DIV'&&c.attrs.class==='txt2';
-        if(['img','fieldset'].includes(s))return c.tagName===s.toUpperCase();
+        if(['img','fieldset','input','select'].includes(s))return c.tagName===s.toUpperCase();
         if(s==='tr'||s==='b')return c.tagName===s.toUpperCase();
         if(s==='table')return c.tagName==='TABLE';
         if(s==='a[href*="player.php?num="]')return c.tagName==='A'&&(c.attrs.href||'').includes('player.php?num=');
@@ -37,7 +37,7 @@ function node(tag, value='', attrs={}, children=[]) {
         if(s.startsWith('tr[data-role='))return c.tagName==='TR'&&c.attrs['data-role']===s.match(/"([^"]+)"/)[1];
         return false;
       }));
-    },cloneNode(){return node(this.tagName,this.childNodes.filter(c=>c.nodeType===3).map(c=>c.nodeValue).join(''),{...this.attrs},this.children.map(c=>c.cloneNode(true)));},remove(){if(this.parent){this.parent.children=this.parent.children.filter(c=>c!==this);this.parent.childNodes=this.parent.childNodes.filter(c=>c!==this);}} };
+    },cloneNode(){const copy=node(this.tagName,'',{...this.attrs},this.children.map(c=>c.cloneNode(true)));copy.childNodes=this.childNodes.map(c=>c.nodeType===3?text(c.nodeValue):copy.children[this.children.indexOf(c)]);return copy;},remove(){if(this.parent){this.parent.children=this.parent.children.filter(c=>c!==this);this.parent.childNodes=this.parent.childNodes.filter(c=>c!==this);}} };
   Object.defineProperty(n,'descendants',{get:()=>n.children.flatMap(c=>[c,...(c.descendants||[])])});
   Object.defineProperty(n,'textContent',{get:()=>n.childNodes.map(c=>c.nodeType===3?c.nodeValue:c.textContent).join('')});
   n.children.forEach((c,i)=>{c.nextElementSibling=n.children[i+1]||null;c.parent=n;});
@@ -156,6 +156,55 @@ assert.equal(expanded.renewal.requestedSalaryPerTour,4800);assert.equal(expanded
 assert.equal(expanded.history.length,2);assert.equal(expanded.history[1].salaryPerTour,8000);assert.equal(expanded.current.salaryPerTour,12000);assert.equal(expanded.current.endsAt,'Synthetic end');assert.equal(expanded.current.signedDay,5);
 const missingContract=t.parsePlayerContract(documentWith([]),'contracts','123456');assert.equal(missingContract.current.salaryPerTour,null);assert.equal(missingContract.renewal.adjustmentPercent,null);assert.equal(missingContract.history.length,0);
 assert.equal(t.mergePlayerDetails({...p,fatigue:null,form:null},info,null,null,'opponent').fatigue,null);
+// Management fixtures use confirmed headers/colspan expansion, never real users.
+const mgPlayer=id=>node('a','Synthetic Player',{href:'player.php?num='+id});
+const hiddenId=id=>node('input','',{name:'del_plr_id[0]',value:id,type:'hidden'});
+const mgForm=title=>node('td','',{},[node('div','',{title})]);
+const trainingHeader=tr(['','Игрок','Нац','Позиции','В','Сила','сТр','Спецвозможности',node('td','Дн',{title:'Дней на тренировке'}),node('td','%',{title:'Прогресс тренировки'}),'У','Ф','Ст','и/о','1','Персп.']);
+const trainActiveRow=tr(['',node('td','',{},[hiddenId('200000')]),'Synthetic Player','','CD','20','80','700к','И4','0','0%','2','','','+1','+','']);
+const trainHeaderText='Тренировочный центр Уровень: 7 Скорость тренировки: 70% - 130% за тур Осталось тренировок силы: 50 из 50 Одному игроку не более: 8 Осталось спецвозможностей: 6 из 7 Одному игроку не более: 2 Осталось совмещений: 3 из 3 1 замена позиции = 2 совмещения Игроков на тренировке: 1 из 5 Стоимость тренировок: Сила: 200 000 - 1 400 000 Спецвозможность: 700 000 Позиция: 400 000 - 800 000';
+const trainDoc=documentWith([node('div',trainHeaderText),node('table','',{},[trainingHeader,trainActiveRow])],'var curr=12345;var arr_plr_basetraining={200000:[0,0,3,"И4",1]};');
+const parsedTrain=t.parseTrainingCenter(trainDoc,'https://vfliga.com/mng_base_train.php');
+assert.equal(parsedTrain.center.level,7);assert.equal(parsedTrain.center.speedPercentPerTour,null);assert.equal(parsedTrain.center.speedPercentRange.min,70);assert.equal(parsedTrain.center.speedPercentRange.max,130);
+assert.equal(parsedTrain.center.resources.strength.remaining,50);assert.equal(parsedTrain.center.resources.strength.maxPerPlayer,8);assert.equal(parsedTrain.center.resources.specials.remaining,6);assert.equal(parsedTrain.center.resources.specials.total,7);assert.equal(parsedTrain.center.resources.specials.maxPerPlayer,2);assert.equal(parsedTrain.center.resources.positions.remaining,3);assert.equal(parsedTrain.center.resources.positions.total,3);assert.equal(parsedTrain.center.resources.positions.replacementCostUnits,2);
+assert.equal(parsedTrain.center.capacity.currentPlayers,1);assert.equal(parsedTrain.center.capacity.maxPlayers,5);assert.equal(parsedTrain.center.costs.strengthMin,200000);assert.equal(parsedTrain.center.costs.strengthMax,1400000);assert.equal(parsedTrain.center.costs.special,700000);assert.equal(parsedTrain.center.costs.positionMin,400000);assert.equal(parsedTrain.center.costs.positionMax,800000);
+assert.equal(parsedTrain.active.length,1);assert.equal(parsedTrain.active[0].playerId,'200000');assert.equal(parsedTrain.active[0].days,0);assert.equal(parsedTrain.active[0].progressPercent,0);assert.equal(parsedTrain.active[0].result,'И4');assert.equal(parsedTrain.active[0].trainingType,null);
+assert.equal(t.parseTrainingCenter(documentWith([]),'https://vfliga.com').active.length,0);
+const seasonSelect=name=>node('select','',{name},[node('option','59',{value:'59'}),node('option','60',{value:'60',selected:''})]);
+const trainHistoryHeader=tr(['День','Дата','Игрок','Поз1','Поз2','В','С','Спецвозможности',node('td','Тренировка',{title:'Описание проведенной тренировки'}),'']);
+const trainEvent=season=>tr([node('td',String(season),{title:'Сезон: '+season}),node('td','20',{title:'День: 20'}),'Synthetic date',node('td','',{},[mgPlayer('200000')]),'CD','CM','20','80','Км2','Км3','550 000']);
+const trainHistoryDoc=documentWith([seasonSelect('a'),seasonSelect('b'),node('table','',{},[trainHistoryHeader,trainEvent(60),trainEvent(59)])],'var curr=12345;');
+const trainHistory=t.parseTrainingHistory(trainHistoryDoc,'https://vfliga.com',60);assert.equal(trainHistory.length,1);assert.equal(trainHistory[0].result,'Км3');assert.equal(trainHistory[0].day,20);assert.equal(trainHistory[0].cost,550000);
+const scoutHeader=tr(['','Игрок','Нац','Поз','В','С','У','Ф','Спецвозможности','Изучает','Сейчас','Будет','Т',node('td','%',{title:'Прогресс изучения'}),'и/о','1']);
+const scoutRow=tr(['',node('td','',{},[hiddenId('200000')]),'Synthetic Player','','CM','20','80','3','','Км','рост силы',node('td','',{},[node('div','',{title:'где-то в промежутке от 1% до 50%'})]),node('td','',{},[node('div','',{title:'<ul>ambiguous tooltip</ul>'})]),'2','81','+1','']);
+const scoutText='Скаут-центр Уровень: 2 Скорость изучения: 30% - 50% в день Осталось изучений стилей: 9 из 10 Осталось изучений роста силы: 7 из 8 Осталось изучений потери силы: 4 из 8 Осталось изучений травматичности: 8 из 8 Осталось изучений лояльности: 8 из 8 Стоимость любого изучения: 30 000';
+const scoutDoc=documentWith([node('div',scoutText),node('table','',{},[scoutHeader,scoutRow])],'var curr=12345;');
+const parsedScout=t.parseScoutingCenter(scoutDoc,'https://vfliga.com');assert.equal(parsedScout.center.level,2);assert.equal(parsedScout.center.speedPercent.min,30);assert.equal(parsedScout.center.speedPercent.max,50);assert.equal(parsedScout.center.costPerStudy,30000);
+assert.deepEqual(Array.from(Object.values(parsedScout.resources),r=>r.remaining),[9,7,4,8,8]);assert.deepEqual(Array.from(Object.values(parsedScout.resources),r=>r.total),[10,8,8,8,8]);assert.equal(parsedScout.active[0].turns,2);assert.equal(parsedScout.active[0].progressPercent,81);assert.equal(parsedScout.active[0].currentValue,'где-то в промежутке от 1% до 50%');assert.equal(parsedScout.active[0].expectedValue,null);
+const scoutHistoryDoc=documentWith([seasonSelect('season'),node('table','',{},[tr(['На изучении:']),tr(['Игрок','Изучение','Прогресс','Дней']),tr([node('td','',{},[mgPlayer('200000')]),'рост силы','81%','2'])]),node('table','',{},[tr(['Завершено изучений:']),tr(['Дата','Игрок','Изучение','Уровень']),tr(['Synthetic date',node('td','',{},[mgPlayer('200000')]),'рост силы','3 из 4']),tr(['Synthetic date',node('td','',{},[mgPlayer('200001')]),'стиль','?'])]),node('table','',{},[tr(['Отмены изучений:']),tr(['Synthetic date',node('td','',{},[mgPlayer('200002')]),'рост силы','Cancelled'])])],'var curr=12345;');
+const scoutHistory=t.parseScoutingHistory(scoutHistoryDoc,'https://vfliga.com');assert.equal(scoutHistory.active[0].days,2);assert.equal(scoutHistory.completed.length,2);assert.equal(scoutHistory.completed[0].result.level,3);assert.equal(scoutHistory.completed[0].result.maxLevel,4);assert.equal(scoutHistory.completed[1].result,null);
+const fitnessText='Центр физподготовки Уровень: 6 Усталость восстанавливается на 2% лучше Осталось изменений физ. формы: 26 из 26 Запланировано всего изменений: 1 В ближайший игровой день: 1';
+const fitnessDoc=documentWith([node('div',fitnessText)],'var curr=12345;');
+const parsedFitness=t.parseFitnessCenter(fitnessDoc,'https://vfliga.com');assert.equal(parsedFitness.center.level,6);assert.equal(parsedFitness.center.fatigueRecoveryBonusPercent,2);assert.equal(parsedFitness.center.changes.remaining,26);assert.equal(parsedFitness.center.changes.total,26);assert.equal(parsedFitness.center.changes.planned,1);assert.equal(parsedFitness.center.changes.nextGameDay,1);
+const fitnessHeader=last=>tr([node('td','День',{colspan:'2'}),'Игрок','Ф','Поз','В','С','Спецвозможности','Было',last]);
+const fitnessRow=(last,season=null)=>tr([node('td','32',season?{title:'Сезон: '+season}:{}),'Synthetic date',node('td','',{},[mgPlayer('200000')]),'','CM','20','80','Км',mgForm('112%, растёт'),last==='Ошибка'?node('td','Synthetic failure'):mgForm('112%, падает')]);
+const fitnessHistoryDoc=documentWith([node('table','',{},[fitnessHeader('Будет'),fitnessRow('Будет')]),node('table','',{},[fitnessHeader('Стало'),fitnessRow('Стало')]),node('table','',{},[fitnessHeader('Ошибка'),fitnessRow('Ошибка')])],'var curr=12345;');
+const fitnessHistory=t.parseFitnessHistory(fitnessHistoryDoc,'https://vfliga.com',60);assert.equal(fitnessHistory.planned.length,1);assert.equal(fitnessHistory.planned[0].oldForm.percent,112);assert.equal(fitnessHistory.planned[0].oldForm.trend,'rising');assert.equal(fitnessHistory.planned[0].newForm.trend,'falling');assert.equal(fitnessHistory.completed.length,0);assert.equal(fitnessHistory.cancelled.length,0);assert.equal(fitnessHistory.scopeWarnings.length,1);
+// Guard against importing unknown or previous-season fitness history. Nonempty
+// completed/cancelled production data remain unverified; explicit season labels
+// below exercise filtering and the already-confirmed shared column layout only.
+const scopedFitness=documentWith([node('table','',{},[fitnessHeader('Стало'),fitnessRow('Стало',60),fitnessRow('Стало',59)]),node('table','',{},[fitnessHeader('Ошибка'),fitnessRow('Ошибка',60)])]);
+const scoped=t.parseFitnessHistory(scopedFitness,'https://vfliga.com',60);assert.equal(scoped.completed.length,1);assert.equal(scoped.cancelled[0].error,'Synthetic failure');assert.equal(t.managementForm(mgForm('unknown')),null);
+const emptyFitness=t.parseFitnessHistory(documentWith([]),'https://vfliga.com',60);for(const key of ['planned','completed','cancelled'])assert.equal(emptyFitness[key].length,0);
+const unknownScout=t.parseScoutingCenter(documentWith([]),'https://vfliga.com');assert.equal(unknownScout.center.level,null);assert.equal(unknownScout.resources.styles.remaining,null);
+const managementDocs={'/mng_base_ch.php?page=2':fitnessHistoryDoc,'/mng_base_train.php':trainDoc,'/mng_base_train_history.php':trainHistoryDoc,'/mng_scout_styles.php':scoutDoc,'/mng_scout_styles_history.php':scoutHistoryDoc,'/mng_base_ch.php':fitnessDoc};
+// The current/history fitness paths differ by query string; route separately.
+const malformedTraining=trainActiveRow.cloneNode(true);malformedTraining.children[9].childNodes=[text('?')];malformedTraining.children[10].childNodes=[text('?')];
+const malformedTrain=t.parseTrainingCenter(documentWith([node('table','',{},[trainingHeader.cloneNode(true),malformedTraining])]),'https://vfliga.com');assert.equal(malformedTrain.active[0].days,null);assert.equal(malformedTrain.active[0].progressPercent,null);
+// Preserve interleaved text and spans as real DOM cloning does.
+const wrapped=node('div','',{},[node('b','6'),node('b','7')]);wrapped.childNodes=[text('Осталось спецвозможностей: '),wrapped.children[0],text(' из '),wrapped.children[1]];
+const wrappedTraining=t.parseTrainingCenter(documentWith([node('h1','Тренировочный центр'),wrapped]),'https://vfliga.com');assert.equal(wrappedTraining.center.resources.specials.remaining,6);assert.equal(wrappedTraining.center.resources.specials.total,7);
+const missingLimitDoc=documentWith([node('div',trainHeaderText.replace('Одному игроку не более: 8','Одному игроку не более: неизвестно'))]);assert.equal(t.parseTrainingCenter(missingLimitDoc,'https://vfliga.com').center.resources.strength.maxPerPlayer,null);
 // Exercise the actual deep loop over every roster ID, without network or delays.
 context.setTimeout=fn=>fn();
 context.document=doc;
@@ -166,7 +215,7 @@ t.deepPlayerScan(roster,'Synthetic opponent',id=>'https://vfliga.com/player.php?
   assert.equal(context.window.requests.some(u=>/player_(stats|contracts)\.php/.test(u)),false);
   for(const player of details){assert.equal('stats' in player,false);assert.equal('contract' in player,false);assert.equal(player.info.recentMatches.length,2);}
   const ownDisplay=documentWith([],playerLine+';var curr=12345;var sort=1;');
-  const ownCurrent=documentWith([node('div','Финансы: 5 000'),node('div','Рейтинг силы команды (Vs): 100')],playerLine+';var curr=12345;var sort=300;');
+  const ownCurrent=documentWith([node('div','Финансы: 5 000'),node('div','Рейтинг силы команды (Vs): 100')],playerLine+';var curr=12345;var sort=300;var tek_season=60;');
   const requests=[];
   t.mockCollectors(ownDisplay,ownCurrent,opponentDoc,deepProfile,{6:financeDoc,4:dealsDoc,3:rankingDoc,'/player_stats.php':statsDoc,'/player_contracts.php':expandedContractDoc},requests);
   for(const depth of ['normal','deep']) {
@@ -175,6 +224,7 @@ t.deepPlayerScan(roster,'Synthetic opponent',id=>'https://vfliga.com/player.php?
     const ownPlayerRequests=requests.slice(ownBefore).filter(u=>/\/player(?:_stats|_contracts)?\.php/.test(u));
     assert.equal(ownPlayerRequests.length,depth==='deep'?3:0);
     if(depth==='deep'){assert.equal(own.playerDetails[0].stats.total.games,5);assert.equal(own.playerDetails[0].contract.renewal.adjustmentPercent,-18);assert.equal(own.playerDetails[0].info.recentMatches.length,1);}
+    assert.equal(own.managementIncluded,false);assert.equal('management' in own,false);
     assert.equal(own.clubDataIncluded,false);assert.equal(own.team.finance,5000);assert.equal(own.team.ratings.vs,100);assert.equal('resources' in own.team,false);
     for(const key of ['finances','deals','teamStatistics'])assert.equal(key in own,false);
     assert.equal(requests.some(url=>/[?&]pm=(3|4|6)(?:&|$)/.test(url)),false);
@@ -188,7 +238,7 @@ t.deepPlayerScan(roster,'Synthetic opponent',id=>'https://vfliga.com/player.php?
     assert.equal('playerDetails' in withClub,depth==='deep');
     const before=requests.length;
     const opponent=await t.collectOpponent(1,depth,true);
-    for(const key of ['finances','deals','teamStatistics','clubDataIncluded'])assert.equal(key in opponent,false);
+    for(const key of ['finances','deals','teamStatistics','clubDataIncluded','managementIncluded','management'])assert.equal(key in opponent,false);
     assert.equal(requests.slice(before).some(url=>/[?&]pm=(3|4|6)(?:&|$)/.test(url)),false);
     assert.equal(opponent.roster.playerIds.length,28);
     assert.equal(requests.slice(before).filter(u=>/\/player(?:_stats|_contracts)?\.php/.test(u)).length,depth==='deep'?28:0);
@@ -196,6 +246,29 @@ t.deepPlayerScan(roster,'Synthetic opponent',id=>'https://vfliga.com/player.php?
     if(depth==='deep'){assert.equal(opponent.playerDetails.length,28);for(const player of opponent.playerDetails){assert.equal('stats' in player,false);assert.equal('contract' in player,false);assert.equal(player.info.recentMatches.length,1);}}
     requests.length=0;
   }
+  // Fixed six requests, independent Management/Club Data for normal and deep.
+  for(const depth of ['normal','deep'])for(const club of [false,true])for(const management of [false,true]) {
+    const transport={...managementDocs,6:financeDoc,4:dealsDoc,3:rankingDoc,'/player_stats.php':statsDoc,'/player_contracts.php':expandedContractDoc};
+    const req=[];t.mockCollectors(ownDisplay,ownCurrent,opponentDoc,deepProfile,transport,req);
+    const own=await t.collectOwnTeam(2,depth,club,management);
+    assert.equal(own.managementIncluded,management);assert.equal('management' in own,management);assert.equal(own.clubDataIncluded,club);assert.equal('finances' in own,club);
+    assert.equal(req.filter(u=>/\/mng_/.test(u)).length,management?6:0);
+    assert.equal(req.filter(u=>/\/player(?:_stats|_contracts)?\.php/.test(u)).length,depth==='deep'?3:0);
+    assert.equal('resources' in own.team,false);
+    if(management){assert.deepEqual(Object.keys(own.management),['training','scouting','fitness']);assert.equal(own.management.training.active.length,1);assert.equal(own.management.training.history.length,1);assert.equal(own.management.scouting.active[0].days,2);assert.equal(own.management.fitness.planned.length,1);assert.ok(req.some(u=>u.endsWith('a=60&b=60')));assert.ok(req.some(u=>u.endsWith('season=60')));}
+    const before=req.length;const opponent=await t.collectOpponent(2,depth,true,true);
+    assert.equal('management' in opponent,false);assert.equal('managementIncluded' in opponent,false);assert.equal(req.slice(before).some(u=>/\/mng_/.test(u)),false);
+    assert.equal(req.some(u=>/player_events|scout_forma|season=59/.test(u)),false);
+  }
+  const largeDisplay=documentWith([],many.join(';')+';var curr=12345;var sort=1;var tek_season=60;');
+  const largeCurrent=documentWith([],many.join(';')+';var curr=12345;var sort=300;var tek_season=60;');
+  const largeRequests=[];t.mockCollectors(largeDisplay,largeCurrent,opponentDoc,deepProfile,managementDocs,largeRequests);
+  const largeOwn=await t.collectOwnTeam(2,'normal',false,true);assert.equal(largeOwn.roster.players.length,28);assert.equal(largeRequests.filter(u=>/\/mng_/.test(u)).length,6);assert.equal(largeRequests.some(u=>/\/player(?:_stats|_contracts)?\.php/.test(u)),false);
+  const failureRequests=[];t.mockCollectors(ownDisplay,ownCurrent,opponentDoc,deepProfile,{...managementDocs,'/mng_scout_styles.php':documentWith([],'var curr=99999;')},failureRequests);
+  await assert.rejects(t.collectOwnTeam(2,'normal',false,true),/Активная команда изменилась/);
+  const oldHistoryDoc=documentWith([node('select','',{name:'season'},[node('option','59',{value:'59',selected:''})])],'var curr=12345;');
+  t.mockCollectors(ownDisplay,ownCurrent,opponentDoc,deepProfile,{...managementDocs,'/mng_scout_styles_history.php':oldHistoryDoc});
+  await assert.rejects(t.collectOwnTeam(2,'normal',false,true),/выбран не текущий сезон/);
   t.mockCollectors(ownDisplay,ownCurrent,opponentDoc,infoDoc,{6:documentWith([],'var curr=99999;')});
   await assert.rejects(t.collectOwnTeam(1,'normal',true),/Активная команда изменилась/);
   const matches=t.pickMatches(documentWith([node('a','played',{href:'viewmatch.php?day=10'}),node('a','preview',{href:'previewmatch.php?day=11'})]),'https://vfliga.com',10);
@@ -203,5 +276,5 @@ t.deepPlayerScan(roster,'Synthetic opponent',id=>'https://vfliga.com/player.php?
   assert.equal(t.safeBodyText(documentWith([node('script','ws_token=synthetic-secret'),node('div','synthetic-chat',{id:'chat_txt'}),node('div','safe')])), 'safe');
   assert.equal((source.match(/id="vfl-club-data"/g)||[]).length,1);
   assert.ok(source.includes('run.busy = true'));assert.ok(source.includes('if (run.busy) return'));
-  console.log('PASS: own 3 requests/player, opponent 28 profiles without stats/contracts, normal no deep requests, recent matches N and nulls, renewal factors/history, synthetic roster IDs, selectedStats separation, optional club modules, ledger, deals and rankings, tournament cleanup, unknown values, profile, season, totals, contracts and links.');
+  console.log('PASS: independent Management normal/deep/club matrix, six requests for 28 players, training/scouting/fitness, current-season guards, own 3 requests/player, opponent 28 profiles without stats/contracts, normal no deep requests, recent matches N and nulls, renewal factors/history, synthetic roster IDs, selectedStats separation, optional club modules, ledger, deals and rankings, tournament cleanup, unknown values, profile, season, totals, contracts and links.');
 }).catch(error=>{console.error(error);process.exitCode=1;});
