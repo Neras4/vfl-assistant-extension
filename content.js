@@ -3,7 +3,7 @@
   if (window.__VFL_ASSISTANT_V05__) return;
   window.__VFL_ASSISTANT_V05__ = true;
 
-  const VERSION = "0.5.5";
+  const VERSION = "0.5.6";
   const ORIGIN = location.origin;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -137,32 +137,13 @@
     const financeRaw = text.match(/Финансы:\s*([\d\s]+)/i)?.[1];
     const name = [...doc.querySelectorAll(".tmhd")].map(x => clean(domText(x))).find(Boolean) || null;
 
-    const counter = regex => {
-      const match = text.match(regex);
-      return match ? Number(match[1]) : null;
-    };
-    const scout = {
-      styles: counter(/(\d+)\s+изучен\S*\s+стил/i),
-      growth: counter(/(\d+)\s+роста силы/i),
-      decline: counter(/(\d+)\s+падения силы/i),
-      injury: counter(/(\d+)\s+травматичност/i),
-      loyalty: counter(/(\d+)\s+лояльност/i)
-    };
-
     return {
       teamName: name,
       finance: financeRaw ? Number(financeRaw.replace(/\s/g, "")) : null,
       stadium: text.match(/Стадион:\s*([^\n]+)/i)?.[1] || null,
       base: text.match(/База:\s*([^\n]+)/i)?.[1] || null,
       atmosphere: Number(text.match(/Атмосфера в команде:\s*([+-]?\d+)%/i)?.[1] || 0) || null,
-      ratings: parseRatings(text),
-      resources: {
-        formChanges: Number(text.match(/есть\s+(\d+)\s+изменен/i)?.[1] || 0) || null,
-        trainingStrength: Number(text.match(/осталось\s+(\d+)\s+балл/i)?.[1] || 0) || null,
-        trainingSpecials: Number(text.match(/(\d+)\s+спецвозможност/i)?.[1] || 0) || null,
-        trainingPositions: Number(text.match(/(\d+)\s+позиц/i)?.[1] || 0) || null,
-        scout
-      }
+      ratings: parseRatings(text)
     };
   }
 
@@ -683,7 +664,148 @@
     return out;
   }
 
-  async function collectOwnTeam(maxMatches, depth) {
+  function clubNumber(raw) {
+    const value = clean(raw).replace(/\s/g, '').replace(',', '.');
+    const match = value.match(/^([+-]?\d+(?:\.\d+)?)(к|м|%|затур)?$/i);
+    if (!match) return null;
+    const scale = { 'к': 1000, 'м': 1000000 }[match[2]?.toLowerCase()] || 1;
+    const number = Number(match[1]) * scale;
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function clubSeason(doc) {
+    const option = doc.querySelector('select[name="season"]')?.querySelector('option:checked,option[selected]');
+    return option ? clubNumber(option.getAttribute('value')) : null;
+  }
+
+  function directTableRows(table) {
+    return [...table.querySelectorAll('tr')].filter(row => row.closest('table') === table);
+  }
+
+  function parseClubFinances(doc, sourceUrl) {
+    const entries = [];
+    for (const table of sanitizedRoot(doc).querySelectorAll('table')) {
+      const rows = directTableRows(table);
+      if (!rows.some(row => {
+        const c = [...row.children].map(n => clean(domText(n)));
+        return c.length === 5 && c[0] === 'День' && c[1] === 'Было' && c[2] === '+/-' && c[3] === 'Стало';
+      })) continue;
+      for (const row of rows) {
+        const c = [...row.children];
+        if (c.length !== 6 || !/^dh\d+$/.test(c[1].getAttribute('title') || '')) continue;
+        const change = clubNumber(domText(c[3]));
+        entries.push({
+          date: clean(domText(c[1])) || null,
+          description: clean(domText(c[5])) || null,
+          balanceBefore: clubNumber(domText(c[2])),
+          income: change !== null && change >= 0 ? change : null,
+          expense: change !== null && change < 0 ? -change : null,
+          balanceAfter: clubNumber(domText(c[4]))
+        });
+      }
+    }
+    return { sourceUrl, collectedAt: new Date().toISOString(), season: clubSeason(doc),
+      entries: uniq(entries, entry => JSON.stringify(entry)) };
+  }
+
+  function parseClubDeals(doc, sourceUrl) {
+    const transactions = [];
+    const seen = new Set();
+    const season = clubSeason(doc);
+    for (const table of sanitizedRoot(doc).querySelectorAll('table')) {
+      const rows = directTableRows(table);
+      const section = clean(domText(rows[0]?.querySelector('b')));
+      // Failed bids and academy arrivals are not completed club transactions.
+      if (!section || /^Не(?:\s|$)/i.test(section) || /спортшкол/i.test(section)) continue;
+      const type = /^Куплены на трансферном рынке$/i.test(section) ? 'buy' :
+        /^Проданы на трансферном рынке$/i.test(section) ? 'sell' : null;
+      if (!type) continue;
+      const header = rows.find(row => [...row.children].some(c => clean(domText(c)) === 'Игрок') &&
+        [...row.children].some(c => clean(domText(c)) === 'День'));
+      if (!header) continue;
+      const labels = [...header.children].map(c => clean(domText(c)));
+      const priceIndex = labels.indexOf('Цена');
+      const counterpartyIndex = labels.findIndex(s => s === 'Из команды' || s === 'В команду');
+      for (const row of rows) {
+        const c = [...row.children];
+        // VFL expands the "День" header into day and date cells.
+        if (c.length !== labels.length + 1 || !/^dh\d+$/.test(c[1]?.getAttribute('title') || '')) continue;
+        const player = c[labels.indexOf('Игрок') + 1]?.querySelector('a[href*="player.php?num="]');
+        if (!player) continue;
+        const entry = { date: clean(domText(c[1])) || null, type, section,
+          playerId: param(absUrl(player.getAttribute('href'), sourceUrl), 'num'),
+          playerName: clean(domText(player)) || null,
+          amount: priceIndex >= 0 ? clubNumber(domText(c[priceIndex + 1])) : null,
+          counterparty: counterpartyIndex >= 0 ? clean(domText(c[counterpartyIndex + 1])) || null : null,
+          season };
+        const history = c[1].querySelector('a[href]');
+        const eventUrl = history ? absUrl(history.getAttribute('href'), sourceUrl) : null;
+        const eventId = eventUrl ? param(eventUrl, 'id') : null;
+        const key = eventId ? `${type}:${eventId}:${entry.playerId}` : JSON.stringify(entry);
+        if (!seen.has(key)) { seen.add(key); transactions.push(entry); }
+      }
+    }
+    return { sourceUrl, collectedAt: new Date().toISOString(), season,
+      transactions };
+  }
+
+  function parseTeamStatistics(doc, sourceUrl) {
+    const metrics = {};
+    const root = sanitizedRoot(doc);
+    const names = {1:'attendanceRating',23:'supporters',24:'stadiumCapacityRanking',17:'ownedPlayers',31:'presentPlayers',
+      2:'totalSalary',9:'averageAge',21:'averageStartingAge',33:'averageStartingStrength',
+      18:'s11Ranking',19:'s14Ranking',20:'s17Ranking',8:'vsRanking',10:'progressionRating',
+      11:'baseValue',12:'stadiumValue',13:'buildingsValue',14:'playerValue',25:'playerValueShare',
+      32:'averagePlayerValue',26:'maxPurchasePrice',15:'financeRanking',16:'teamTotalValue'};
+    for (const table of root.querySelectorAll('table')) {
+      const rows = directTableRows(table);
+      if (!rows.some(row => clean(domText(row)).includes('Статистический показатель'))) continue;
+      const headings = rows.find(row => [...row.children].map(c => clean(domText(c))).join('|') === 'лига|континент|страна|дивизион');
+      if (!headings) continue;
+      for (const row of rows) {
+        const c = [...row.children];
+        if (c.length < 6) continue;
+        const labelLink = c[0].querySelector('a[href]');
+        const view = labelLink ? param(absUrl(labelLink.getAttribute('href'), sourceUrl), 'view') : null;
+        const key = names[view];
+        if (!key) continue;
+        const ranking = {};
+        ['league','continent','country','division'].forEach((scope, index) => {
+          const cell = c[c.length - 4 + index];
+          const placeLink = cell.querySelector('a[href]');
+          const changeTitle = [...cell.querySelectorAll('[title]')].map(n => n.getAttribute('title'))
+            .find(title => /мест/.test(title || ''));
+          const match = changeTitle?.replace(/<[^>]*>/g, '').match(/^\s*([+-]?\d[\d ]*)\s+мест/);
+          ranking[scope] = { place: placeLink ? clubNumber(domText(placeLink)) : null,
+            change: match ? clubNumber(match[1]) : null };
+        });
+        if (key.endsWith('Ranking')) metrics[key] = ranking;
+        else {
+          const valueCell = c[c.length - 5];
+          const valueLink = valueCell.querySelector('a[href]');
+          metrics[key] = { value: clubNumber(domText(valueLink || valueCell)), ranking };
+        }
+      }
+    }
+    // This analytical value has its own table, without league ranking columns.
+    const success = cellValue(root, 'Успешность работы менеджера');
+    if (success) metrics.managerSuccess = { value: clubNumber(domText(success)), ranking: null };
+    return { sourceUrl, collectedAt: new Date().toISOString(), metrics };
+  }
+
+  async function collectClubData(teamId) {
+    const result = {};
+    for (const [key, pm, parse] of [['finances',6,parseClubFinances],['deals',4,parseClubDeals],['teamStatistics',3,parseTeamStatistics]]) {
+      const url = `${ORIGIN}/managerzone.php?num=${encodeURIComponent(teamId)}&pm=${pm}`;
+      setStatus(`Данные клуба: ${key}…`);
+      const doc = await fetchDoc(url);
+      if (teamIdFromManager(doc) !== String(teamId)) throw new Error('Активная команда изменилась при сборе данных клуба. Повторите сбор.');
+      result[key] = parse(doc, url);
+    }
+    return result;
+  }
+
+  async function collectOwnTeam(maxMatches, depth, clubData = false) {
     if (!/\/managerzone\.php$/.test(location.pathname)) {
       throw new Error("Откройте https://vfliga.com/managerzone.php");
     }
@@ -718,6 +840,7 @@
       depth,
       generatedAt: new Date().toISOString(),
       teamId,
+      clubDataIncluded: Boolean(clubData),
       sourceUrl: location.href,
       team: parseManagerCore(currentDoc),
       roster,
@@ -732,6 +855,7 @@
       );
     }
 
+    if (clubData) Object.assign(result, await collectClubData(teamId));
     return result;
   }
 
@@ -816,7 +940,7 @@
 
       let data, prefix;
       if (action === "team") {
-        data = await collectOwnTeam(maxMatches, depth);
+        data = await collectOwnTeam(maxMatches, depth, Boolean(document.querySelector("#vfl-club-data")?.checked));
         prefix = "vfl_team_context";
       } else if (action === "opponent") {
         data = await collectOpponent(maxMatches, depth);
@@ -859,6 +983,11 @@
           <option value="deep">Глубокий сбор игроков</option>
         </select>
       </div>
+
+      <label class="vfl-club-data" title="Только для моей команды">
+        <input id="vfl-club-data" type="checkbox">
+        <span>Данные клуба<small>Финансы, история сделок и командная статистика<br>Только для моей команды</small></span>
+      </label>
 
       <button data-action="team">
         <b>Собрать мою команду</b>
