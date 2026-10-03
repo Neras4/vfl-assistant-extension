@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(__dirname + '/content.js', 'utf8');
-const exposed = source.slice(0, source.indexOf('  const panel =')) + '\n window.test = {extractJPlayers,parsePlayerInfo,parsePlayerStats,parsePlayerContract,mergePlayerDetails,domText,collectLinks,rosterCompact,playerIds,parseManagerCore,deepPlayerScan,collectOwnTeam,collectOpponent,pickMatches,safeBodyText, mockCollectors: (display,current,opponent,profile) => { document=display; setStatus=()=>{}; nearestOpponentRosterUrl=()=>ORIGIN+"/roster.php?num=12345"; fetchDoc=async url=>url.includes("player.php")?profile:url.includes("sort=300")?current:url.includes("roster.php")?opponent:display; fetchMatches=async()=>[]; }, mockDeep: (fixture,requests) => { setStatus = () => {}; fetchDoc = async url => { requests.push(url); return fixture; }; }};})();';
+const exposed = source.slice(0, source.indexOf('  const panel =')) + '\n window.test = {extractJPlayers,parsePlayerInfo,parsePlayerStats,parsePlayerContract,mergePlayerDetails,domText,collectLinks,rosterCompact,playerIds,parseManagerCore,deepPlayerScan,collectOwnTeam,collectOpponent,pickMatches,safeBodyText,clubNumber,parseClubFinances,parseClubDeals,parseTeamStatistics,collectClubData, mockCollectors: (display,current,opponent,profile,clubDocs={},requests=[]) => { document=display; setStatus=()=>{}; nearestOpponentRosterUrl=()=>ORIGIN+"/roster.php?num=12345"; fetchDoc=async url=>{requests.push(url);return clubDocs[new URL(url).searchParams.get("pm")] || (url.includes("player.php")?profile:url.includes("sort=300")?current:url.includes("roster.php")?opponent:display);}; fetchMatches=async()=>[]; }, mockDeep: (fixture,requests) => { setStatus = () => {}; fetchDoc = async url => { requests.push(url); return fixture; }; }};})();';
 const context = {window:{}, location:{origin:'https://vfliga.com',href:'https://vfliga.com/managerzone.php',pathname:'/managerzone.php'}, URL, Map, Set};
 vm.runInNewContext(exposed, context);
 const t = context.window.test;
@@ -12,6 +12,7 @@ function text(value) { return {nodeType:3,nodeValue:String(value)}; }
 function node(tag, value='', attrs={}, children=[]) {
   const n = {nodeType:1,tagName:tag.toUpperCase(),attrs,children,childNodes: value ? [text(value),...children] : children,
     getAttribute(k) {return this.attrs[k] ?? null;},
+    closest(tag){let n=this;while(n){if(n.tagName===tag.toUpperCase())return n;n=n.parent;}return null;},
     matches(selector) { return selector.split(',').some(s=>s.trim()===this.tagName.toLowerCase() || s.trim()==='[hidden]' && 'hidden' in this.attrs || /display/.test(s) && /display\s*:\s*none/.test(this.attrs.style||'')); },
     querySelector(selector) {return this.querySelectorAll(selector)[0]||null;},
     querySelectorAll(selector) {
@@ -27,6 +28,7 @@ function node(tag, value='', attrs={}, children=[]) {
         if(s==='select[name="season"]')return c.tagName==='SELECT'&&c.attrs.name==='season';
         if(s==='select option')return c.tagName==='OPTION';
         if(s==='div.txt2')return c.tagName==='DIV'&&c.attrs.class==='txt2';
+        if(s==='tr'||s==='b')return c.tagName===s.toUpperCase();
         if(s==='table')return c.tagName==='TABLE';
         if(s==='a[href*="player.php?num="]')return c.tagName==='A'&&(c.attrs.href||'').includes('player.php?num=');
         if(s==='body')return c.tagName==='BODY';
@@ -95,10 +97,7 @@ for(const fatigue of [-1,25]) {
   const hidden=t.extractJPlayers(documentWith([],'new jPlayer('+a.map(JSON.stringify).join(',')+')'))[0];
   assert.equal(hidden.fatigue,null);assert.equal(hidden.form,null);assert.equal(hidden.formTrend,null);
 }
-const scout=t.parseManagerCore(documentWith([node('div','Есть 8 изучений стилей, 7 роста силы, 6 падения силы, 0 травматичности, 4 лояльности')])).resources.scout;
-assert.deepEqual(JSON.parse(JSON.stringify(scout)),{styles:8,growth:7,decline:6,injury:0,loyalty:4});
-assert.equal(t.parseManagerCore(documentWith([])).resources.scout.styles,null);
-assert.equal(t.parseManagerCore(documentWith([node('div','Осталось 2 изучения стилей')])).resources.scout.styles,2);
+assert.equal('resources' in t.parseManagerCore(documentWith([node('div','Есть 8 изучений стилей, 7 роста силы, 30 изменений формы')])),false);
 const cup=statsRow('mt',['','Synthetic Cup','-','2','-','?','-','-','-','-','-'],{'data-mt':'2','data-group':'club'});
 const counter=node('div','3',{class:'txt2',style:'float:right'});
 counter.parent=cup.children[1];cup.children[1].children.push(counter);cup.children[1].childNodes.push(counter);
@@ -106,6 +105,33 @@ const cleanStats=t.parsePlayerStats(documentWith([node('table','',{},[cup,total,
 assert.equal(cleanStats.tournaments.length,1);assert.equal(cleanStats.tournaments[0].tournament,'Synthetic Cup');
 assert.equal(cleanStats.tournaments[0].averageRating,null);assert.equal(cleanStats.tournaments[0].goals,0);assert.equal(cleanStats.tournaments[0].assists,null);
 assert.equal(cleanStats.total.games,5); // never recomputed from tournaments
+// Club pages have a split day/date cell and separate ranking/change elements.
+const tr=values=>node('tr','',{},values.map(v=>typeof v==='string'?node('td',v):v));
+const td=value=>node('td',value);
+const financeRow=(before,change,after)=>tr(['9',node('td','Example date',{title:'dh0'}),before,change,after,'Synthetic ledger event']);
+const financeTable=node('table','',{},[tr(['День','Было','+/-','Стало','Вся финансовая история']),financeRow('2 000','-250','1 750'),financeRow('2 000','-250','1 750'),financeRow('?','?','')]);
+const financeDoc=documentWith([seasons,financeTable],'var curr=12345;');
+const ledger=t.parseClubFinances(financeDoc,'finance');
+assert.equal(ledger.entries.length,2);assert.equal(ledger.entries[0].expense,250);assert.equal(ledger.entries[0].income,null);assert.equal(ledger.entries[1].balanceAfter,null);assert.equal(ledger.entries[1].expense,null);
+assert.equal(ledger.season,60);assert.equal('balance' in ledger,false);
+const dealHeader=tr(['День','Игрок','Нац','Поз','В','С','Спецвозможности','Из команды','%','Цена']);
+const dealRow=()=>tr(['9',node('td','Example date',{title:'dh0'}),node('td','tooltip noise',{},[node('a','Synthetic Player',{href:'player.php?num=200000'})]),'','CM','20','80','Пк','Synthetic FC','50%','1 250к']);
+const dealTable=section=>node('table','',{},[tr([node('td','',{},[node('b',section)])]),dealHeader.cloneNode(true),dealRow(),dealRow()]);
+const dealsDoc=documentWith([seasons,dealTable('Куплены на трансферном рынке'),dealTable('Не удалось купить на трансферном рынке'),dealTable('Игроки, пришедшие из спортшколы')],'var curr=12345;');
+const deals=t.parseClubDeals(dealsDoc,'https://vfliga.com/managerzone.php?pm=4');assert.equal(deals.transactions.length,1);assert.equal(deals.transactions[0].amount,1250000);assert.equal(deals.transactions[0].playerId,'200000');assert.equal(deals.transactions[0].playerName,'Synthetic Player');assert.equal(deals.transactions[0].counterparty,'Synthetic FC');
+const rank=(place,change)=>node('td','',{},[node('div','99',{title:'<b>'+change+'</b> места за сезон'}),node('a',place,{href:'statistics.php'})]);
+const metricRow=(view,label,value)=>tr([node('td','',{},[node('a',label,{href:'managerzone.php?pm=3&view='+view})]),node('td','99',{},[node('a',value,{href:'managerzone.php?pm=3&view='+view})]),rank('123','-7'),rank('45','+3'),rank('','?'),rank('8','0')]);
+const rankingDoc=documentWith([node('table','',{},[tr(['Статистический показатель','Место']),tr(['лига','континент','страна','дивизион']),metricRow(1,'Рейтинг посещаемости:','1,25'),metricRow(8,'Vs','9000'),metricRow(15,'В кассе команды:','999999'),metricRow(14,'Стоимость игроков','5 000 000'),metricRow(25,'(в %)','70,5 %')])],'var curr=12345;');
+const ranks=t.parseTeamStatistics(rankingDoc,'https://vfliga.com/managerzone.php?pm=3').metrics;
+assert.equal(ranks.attendanceRating.value,1.25);assert.equal(ranks.attendanceRating.ranking.league.place,123);assert.equal(ranks.attendanceRating.ranking.league.change,-7);assert.equal(ranks.attendanceRating.ranking.continent.change,3);assert.equal(ranks.attendanceRating.ranking.country.place,null);assert.equal(ranks.attendanceRating.ranking.country.change,null);assert.equal(ranks.vsRanking.league.place,123);assert.equal('value' in ranks.vsRanking,false);assert.equal('value' in ranks.financeRanking,false);assert.equal(ranks.playerValueShare.value,70.5);
+for(const raw of ['', '-', '?','123foo'])assert.equal(t.clubNumber(raw),null);
+assert.equal(t.clubNumber('0'),0);
+const malformedDeals=dealsDoc.documentElement.cloneNode(true);
+const prices=malformedDeals.querySelectorAll('table').flatMap(table=>table.querySelectorAll('tr')).filter(row=>row.children.length===11);
+for(const row of prices){row.children[10].childNodes=[text('?')];}
+assert.equal(t.parseClubDeals({documentElement:malformedDeals,querySelector:s=>malformedDeals.querySelector(s)},'https://vfliga.com/managerzone.php?pm=4').transactions[0].amount,null);
+assert.equal(Object.keys(t.parseTeamStatistics(documentWith([]),'https://vfliga.com').metrics).length,0);
+assert.equal(t.parseClubFinances(documentWith([]),'https://vfliga.com').entries.length,0);
 // Exercise the actual deep loop over every roster ID, without network or delays.
 context.setTimeout=fn=>fn();
 context.document=doc;
@@ -114,19 +140,36 @@ t.deepPlayerScan(roster,'Synthetic opponent',id=>'https://vfliga.com/player.php?
   assert.equal(details.length,24);assert.equal(context.window.requests.length,24);
   assert.deepEqual(Array.from(details,p=>p.playerId),Array.from(roster.playerIds));
   const ownDisplay=documentWith([],playerLine+';var curr=12345;var sort=1;');
-  const ownCurrent=documentWith([],playerLine+';var curr=12345;var sort=300;');
-  t.mockCollectors(ownDisplay,ownCurrent,opponentDoc,infoDoc);
+  const ownCurrent=documentWith([node('div','Финансы: 5 000'),node('div','Рейтинг силы команды (Vs): 100')],playerLine+';var curr=12345;var sort=300;');
+  const requests=[];
+  t.mockCollectors(ownDisplay,ownCurrent,opponentDoc,infoDoc,{6:financeDoc,4:dealsDoc,3:rankingDoc},requests);
   for(const depth of ['normal','deep']) {
     const own=await t.collectOwnTeam(1,depth);
+    assert.equal(own.clubDataIncluded,false);assert.equal(own.team.finance,5000);assert.equal(own.team.ratings.vs,100);assert.equal('resources' in own.team,false);
+    for(const key of ['finances','deals','teamStatistics'])assert.equal(key in own,false);
+    assert.equal(requests.some(url=>/[?&]pm=(3|4|6)(?:&|$)/.test(url)),false);
     assert.equal(own.roster.players.length,1);assert.equal(own.roster.players[0].fatigue,11);
     assert.equal(own.roster.players[0].selectedStats.scope.sort,1);
     if(depth==='deep')assert.equal(own.playerDetails[0].selectedStats.scope.sort,1);
-    const opponent=await t.collectOpponent(1,depth);
+    const withClub=await t.collectOwnTeam(1,depth,true);
+    assert.equal(withClub.clubDataIncluded,true);
+    assert.equal(withClub.finances.entries.length,2);assert.equal(withClub.deals.transactions.length,1);
+    assert.deepEqual(JSON.parse(JSON.stringify(withClub.team)),JSON.parse(JSON.stringify(own.team)));
+    assert.equal('playerDetails' in withClub,depth==='deep');
+    const before=requests.length;
+    const opponent=await t.collectOpponent(1,depth,true);
+    for(const key of ['finances','deals','teamStatistics','clubDataIncluded'])assert.equal(key in opponent,false);
+    assert.equal(requests.slice(before).some(url=>/[?&]pm=(3|4|6)(?:&|$)/.test(url)),false);
     assert.equal(opponent.roster.playerIds.length,24);
     if(depth==='deep')assert.equal(opponent.playerDetails.length,24);
+    requests.length=0;
   }
+  t.mockCollectors(ownDisplay,ownCurrent,opponentDoc,infoDoc,{6:documentWith([],'var curr=99999;')});
+  await assert.rejects(t.collectOwnTeam(1,'normal',true),/Активная команда изменилась/);
   const matches=t.pickMatches(documentWith([node('a','played',{href:'viewmatch.php?day=10'}),node('a','preview',{href:'previewmatch.php?day=11'})]),'https://vfliga.com',10);
   assert.equal(matches.length,1);assert.ok(matches[0].url.includes('/viewmatch.php?'));
   assert.equal(t.safeBodyText(documentWith([node('script','ws_token=synthetic-secret'),node('div','synthetic-chat',{id:'chat_txt'}),node('div','safe')])), 'safe');
-  console.log('PASS: synthetic roster IDs and full deep loop, selectedStats separation, scout counters, tournament cleanup, unknown values, profile, season, totals, contracts and links.');
+  assert.equal((source.match(/id="vfl-club-data"/g)||[]).length,1);
+  assert.ok(source.includes('run.busy = true'));assert.ok(source.includes('if (run.busy) return'));
+  console.log('PASS: synthetic roster IDs and full deep loop, selectedStats separation, optional club modules, ledger, deals and rankings, tournament cleanup, unknown values, profile, season, totals, contracts and links.');
 }).catch(error=>{console.error(error);process.exitCode=1;});
