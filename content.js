@@ -3,7 +3,7 @@
   if (window.__VFL_ASSISTANT_V05__) return;
   window.__VFL_ASSISTANT_V05__ = true;
 
-  const VERSION = "0.5.8";
+  const VERSION = "0.5.9";
   const ORIGIN = location.origin;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -1126,6 +1126,246 @@
     return { training, scouting, fitness };
   }
 
+  // Confirmed through VFL's live GET form and column-header navigation, 2026-10-03.
+  // Empty bounds are submitted exactly as the native search form submits them:
+  // VFL normalizes them itself (including its special unrestricted maxP value).
+  const TRANSFER_POSITIONS = ["GK","XX","DF","MD","FW","R","L","C","LD","CD","RD","LM","CM","RM","LF","CF","RF"];
+  const TRANSFER_STYLES = ["Спартаковский","Бей-беги","Бразильский","Тики-така","Катеначчо","Британский"];
+  const TRANSFER_SORTS = { strength: 5, price: 7, specials: 13, age: 3 };
+  const TRANSFER_BOUNDS = { age: ["minA","maxA"], price: ["minS","maxS"], strength: ["minP","maxP"], askingPercent: ["minX","maxX"] };
+  const TRANSFER_DEFAULTS = {
+    find_load: "1", status: "1", page: "1", day: "-3", sstyle: "1", sort: "7",
+    pz1: "", pz2: "", andor: "and", rf1: "1", rf2: "1", rf3: "1",
+    sp1: "", sp2: "", sp3: "", sp4: "", nat_id: "", minN: "", maxN: "",
+    minRS: "", maxRS: "", minPS: "", maxPS: "", minTS: "", maxTS: "", minGS: "", maxGS: "",
+    minO: "", maxO: "", style_level: "0", show_retired: "0",
+    show_noretire_1: "1", show_noretire_2: "1", R_unexplored: "1", P_unexplored: "0", T_unexplored: "0", G_unexplored: "0"
+  };
+
+  function transferFilters(input = {}) {
+    const position = clean(String(input.position ?? ""));
+    if (position && !TRANSFER_POSITIONS.includes(position)) throw new Error("Неизвестная позиция рынка.");
+    const style = input.style === "" || input.style == null ? null : Number(input.style);
+    if (style !== null && (!Number.isInteger(style) || style < 1 || style > 6)) throw new Error("Неизвестный стиль рынка.");
+    const filters = { position: position || null, style };
+    for (const key of Object.keys(TRANSFER_BOUNDS)) {
+      const pair = {};
+      for (const bound of ["min", "max"]) {
+        const raw = String(input[key]?.[bound] ?? "").replace(/[\s\u00a0]/g, "");
+        if (raw && !/^\d+$/.test(raw)) throw new Error("Границы фильтров должны быть целыми неотрицательными числами.");
+        pair[bound] = raw ? Number(raw) : null;
+        if (pair[bound] !== null && !Number.isSafeInteger(pair[bound])) throw new Error("Слишком большое значение фильтра.");
+      }
+      if (pair.min !== null && pair.max !== null && pair.min > pair.max) throw new Error("Минимум фильтра больше максимума.");
+      filters[key] = pair;
+    }
+    return filters;
+  }
+
+  function transferSearchUrl(filters, nativeSort = null) {
+    const url = new URL("https://vfliga.com/transferlist.php");
+    for (const [key, value] of Object.entries(TRANSFER_DEFAULTS)) url.searchParams.set(key, value);
+    url.searchParams.set("pz1", filters.position || "");
+    for (const [key, params] of Object.entries(TRANSFER_BOUNDS)) {
+      ["min", "max"].forEach((bound, i) => url.searchParams.set(params[i], filters[key][bound] ?? ""));
+    }
+    for (let id = 1; id <= 6; id++) url.searchParams.set(`plr_style_${id}`, filters.style === id ? "1" : "0");
+    if (nativeSort !== null) {
+      if (!Object.values(TRANSFER_SORTS).includes(nativeSort)) throw new Error("Неизвестная сортировка рынка.");
+      url.searchParams.set("sort", nativeSort);
+    }
+    return url.href;
+  }
+
+  function transferTitle(node) {
+    return clean((node?.getAttribute("title") || node?.getAttribute("alt") || "").replace(/<[^>]*>/g, " "));
+  }
+
+  function transferRaw(cell) {
+    if (!cell) return "";
+    const text = clean(domText(cell));
+    const titles = uniq([transferTitle(cell), ...[...cell.querySelectorAll("[title],img")].map(transferTitle)].filter(Boolean));
+    return uniq([text, ...titles].filter(Boolean)).join("; ");
+  }
+
+  function transferPartial(cell) {
+    const raw = transferRaw(cell);
+    const range = raw.match(/от\s+(\d+)%\s+до\s+(\d+)%/i);
+    const percent = !range && /^\d+%$/.test(raw) ? clubNumber(raw) : null;
+    const stars = raw.match(/^[★☆]+$/);
+    return { percent, min: range ? Number(range[1]) : null, max: range ? Number(range[2]) : null,
+      level: stars ? [...raw].filter(s => s === "★").length : null,
+      maxLevel: stars ? [...raw].length : null, raw: raw || null };
+  }
+
+  function transferStyle(cell) {
+    const raw = transferRaw(cell);
+    const names = uniq([clean(domText(cell)), transferTitle(cell), ...[...(cell?.querySelectorAll("[title],img") || [])].map(transferTitle)]
+      .filter(name => TRANSFER_STYLES.includes(name)));
+    const possibleStyles = names.map(label => ({ id: TRANSFER_STYLES.indexOf(label) + 1, label }));
+    return { id: names.length === 1 ? possibleStyles[0].id : null, label: names.length === 1 ? names[0] : null, possibleStyles, raw: raw || null };
+  }
+
+  function transferTable(doc) {
+    const root = sanitizedRoot(doc);
+    for (const table of root.querySelectorAll("table")) {
+      const rows = directTableRows(table);
+      const header = rows.find(row => [...row.children].some(c => c.getAttribute("title") === "Сила игрока") &&
+        [...row.children].some(c => clean(domText(c)) === "Игрок"));
+      if (header) return { rows, header };
+    }
+    return null;
+  }
+
+  function transferColumns(header) {
+    const cells = [...header.children].filter(c => /^(TD|TH)$/.test(c.tagName));
+    const titles = { nationality: "Национальность игрока", position: "Позиция игрока", age: "Возраст игрока",
+      strength: "Сила игрока", fatigue: "Усталость игрока", form: "Форма игрока", specials: "Спецвозможности игрока",
+      style: "Любимый стиль игрока", growth: "Рост силы игрока", decline: "Падение силы игрока", value: "Стоимость игрока" };
+    const cols = { rank: cells.findIndex(c => clean(domText(c)) === "№"), playerName: cells.findIndex(c => clean(domText(c)) === "Игрок") };
+    for (const [key, title] of Object.entries(titles)) cols[key] = cells.findIndex(c => c.getAttribute("title") === title);
+    cols.bidsCount = cells.findIndex(c => (c.getAttribute("title") || "").startsWith("Число заявок на покупку игрока"));
+    cols.askingPercent = cells.findIndex(c => c.getAttribute("title") === "Начальная цена игрока на рынке (в %)");
+    cols.askingPrice = cells.findIndex(c => c.getAttribute("title") === "Начальная цена игрока на рынке (в тыс. всоликов)");
+    return { cols, width: cells.length };
+  }
+
+  // URLs are rebuilt with the single confirmed identifier; unrelated query data
+  // and authenticated page state never enter the export.
+  function transferLink(row, base, path, key) {
+    for (const a of row.querySelectorAll("a[href]")) {
+      let url;
+      try { url = new URL(a.getAttribute("href"), base); } catch { continue; }
+      const id = url.searchParams.get(key);
+      if (["vfliga.com", "www.vfliga.com"].includes(url.hostname) && url.pathname === path && /^\d+$/.test(id || "")) {
+        const safe = new URL(path, "https://vfliga.com"); safe.searchParams.set(key, id);
+        return { id, url: safe.href, name: clean(domText(a)) };
+      }
+    }
+    return null;
+  }
+
+  function transferRow(row, columns, sourceUrl) {
+    const cells = [...row.children].filter(c => /^(TD|TH)$/.test(c.tagName));
+    if (cells.length !== columns.width) return null; // Never shift a malformed row.
+    const cell = key => columns.cols[key] >= 0 ? cells[columns.cols[key]] : null;
+    const nameCell = cell("playerName");
+    const namedOrder = transferLink(nameCell || row, sourceUrl, "/mng_orderplr.php", "id");
+    const namedProfile = transferLink(nameCell || row, sourceUrl, "/player.php", "num");
+    const rowOrder = namedOrder || transferLink(row, sourceUrl, "/mng_orderplr.php", "id");
+    const rowProfile = namedProfile || transferLink(row, sourceUrl, "/player.php", "num");
+    const link = namedOrder || namedProfile || rowOrder || rowProfile;
+    if (!link) return null;
+    const order = rowOrder?.id === link.id ? rowOrder : null;
+    const profile = rowProfile?.id === link.id ? rowProfile : null;
+    const raw = {};
+    for (const key of Object.keys(columns.cols)) raw[key] = transferRaw(cell(key)) || null;
+    const formRaw = raw.form || "";
+    const formMatch = formRaw.match(/(?:^|;\s*)(\d+)%/);
+    const trend = /раст[её]т/i.test(formRaw) ? "rising" : /падает/i.test(formRaw) ? "falling" : null;
+    const bidsRaw = clean(domText(cell("bidsCount")));
+    const bidsTitle = transferTitle(cell("bidsCount"));
+    const statuses = uniq([...(nameCell?.querySelectorAll("[title],img") || [])].map(transferTitle)
+      .filter(s => s && !/^star_\d+$/.test(s)));
+    // The market has an extra decorative cell before the name; semantic tooltip
+    // text is retained, but unknown sprite classes are not decoded.
+    if (columns.cols.playerName === 2) statuses.push(...[...cells[1].querySelectorAll("[title]")].map(transferTitle).filter(s => s && !/^star_\d+$/.test(s)));
+    return { rank: clubNumber(clean(domText(cell("rank"))).replace(/\.$/, "")), playerId: link.id,
+      playerName: namedOrder?.name || namedProfile?.name || clean(domText(nameCell)) || null,
+      playerUrl: profile?.url || null, orderUrl: order?.url || `https://vfliga.com/mng_orderplr.php?id=${link.id}`,
+      nationality: transferTitle(cell("nationality")) || transferRaw(cell("nationality")) || null,
+      position: clean(domText(cell("position"))) || null,
+      age: clubNumber(clean(domText(cell("age")))), strength: clubNumber(clean(domText(cell("strength")))),
+      fatigue: clubNumber(clean(domText(cell("fatigue")))), form: formMatch ? Number(formMatch[1]) : clubNumber(clean(domText(cell("form")))), formTrend: trend,
+      specials: clean(domText(cell("specials"))) || null, style: transferStyle(cell("style")),
+      growth: transferPartial(cell("growth")), decline: transferPartial(cell("decline")), value: clubNumber(clean(domText(cell("value")))),
+      bidsCount: bidsRaw === "-" && bidsTitle === "Нет заявок" ? 0 : clubNumber(bidsRaw),
+      askingPercent: clubNumber(clean(domText(cell("askingPercent")))), askingPrice: clubNumber(clean(domText(cell("askingPrice")))),
+      statuses: uniq(statuses), raw };
+  }
+
+  function parseTransferSearch(doc, sourceUrl) {
+    const text = safeBodyText(doc, 200000);
+    const range = text.match(/Всего\s+([\d\s]+)\s+игрок(?:ов|а)?\.\s*Показаны\s+с\s+(\d+)\s+по\s+(\d+)/i);
+    const totalOnly = text.match(/Всего\s+(\d+)\s+игрок(?:ов|а)?/i);
+    const empty = /Не найдено ни одного игрока на рынке\. Попробуйте расширить круг поиска/i.test(text);
+    const totalResults = range ? Number(range[1].replace(/\s/g, "")) : totalOnly ? Number(totalOnly[1]) : empty ? 0 : null;
+    const table = transferTable(doc);
+    const columns = table ? transferColumns(table.header) : null;
+    const players = table ? table.rows.map(row => transferRow(row, columns, sourceUrl)).filter(Boolean).slice(0,50) : [];
+    return { pagination: { totalResults, totalPages: totalResults === null ? null : Math.ceil(totalResults / 50), page: 1, pageSize: 50,
+      shownFrom: range ? Number(range[2]) : totalResults === 0 ? 0 : null, shownTo: range ? Number(range[3]) : totalResults === 0 ? 0 : null }, players };
+  }
+
+  function parseTransferBids(doc, sourceUrl) {
+    const purchaseLimits = {};
+    for (const key of ["total","GK","LD","CD","RD","LM","CM","RM","LF","CF","RF"]) {
+      const select = doc.querySelector(`#transfer_${key.toLowerCase()}`);
+      const option = select?.querySelector("option:checked,option[selected]");
+      purchaseLimits[key] = clubNumber(option?.getAttribute("value") ?? "");
+    }
+    const table = transferTable(doc), bids = [];
+    if (table) {
+      const columns = transferColumns(table.header);
+      let current = null, auction = null;
+      for (const row of table.rows) {
+        const cells = [...row.children].filter(c => /^(TD|TH)$/.test(c.tagName));
+        if (cells.length === 2 && /^День\s+\d+$/.test(cells[0].getAttribute("title") || "")) {
+          auction = { day: clubNumber(cells[0].getAttribute("title").replace("День", "")), date: clean(domText(cells[0])) || null, competition: clean(domText(cells[1])) || null };
+          current = null;
+        }
+        const player = transferRow(row, columns, sourceUrl);
+        if (player) { current = { ...player, auction, bidPrice: null, bidPercent: null, bidRaw: { price: null, percent: null } }; bids.push(current); continue; }
+        if (cells.length === columns.width || [...row.querySelectorAll("a[href]")].some(a => /mng_orderplr\.php/.test(a.getAttribute("href") || ""))) current = null;
+        if (current && /Ваша заявка:/.test(clean(domText(row)))) {
+          const input = [...row.querySelectorAll("input")].find(e => /^price_\d+$/.test(e.getAttribute("id") || ""));
+          const amount = clubNumber(input?.getAttribute("value") ?? "");
+          // Confirmed input is in thousands, followed by the literal 000 unit.
+          current.bidPrice = amount === null ? null : amount * 1000;
+          const percent = [...row.querySelectorAll("[id]")].find(e => /^percent_\d+$/.test(e.getAttribute("id") || ""));
+          current.bidPercent = clubNumber(clean(domText(percent)));
+          current.bidRaw = { price: input?.getAttribute("value") ?? null, percent: clean(domText(percent)) || null };
+        }
+      }
+    }
+    return { sourceUrl, collectedAt: new Date().toISOString(), purchaseLimits, bids };
+  }
+
+  async function collectTransferMarket(input, requested = "strength") {
+    if (!Object.hasOwn(TRANSFER_SORTS, requested)) throw new Error("Неизвестная сортировка рынка.");
+    const filters = transferFilters(input);
+    setStatus("Ищу игроков на трансферном рынке…");
+    let sourceUrl = transferSearchUrl(filters);
+    let result = parseTransferSearch(await fetchDoc(sourceUrl), sourceUrl);
+    if (result.pagination.totalPages === null) throw new Error("Не удалось прочитать количество результатов рынка. Проверьте авторизацию VFL.");
+    let applied = false;
+    if (result.pagination.totalPages > 1) {
+      sourceUrl = transferSearchUrl(filters, TRANSFER_SORTS[requested]);
+      setStatus("Применяю сортировку к первой странице рынка…");
+      result = parseTransferSearch(await fetchDoc(sourceUrl), sourceUrl);
+      if (result.pagination.totalPages === null) throw new Error("Не удалось прочитать отсортированный результат рынка.");
+      applied = true;
+    }
+    return { kind: "vfl-transfer-market", exporterVersion: VERSION, generatedAt: new Date().toISOString(),
+      management: { transferMarket: { sourceUrl, collectedAt: new Date().toISOString(), search: {
+        filters, sort: { requested, applied, nativeSort: applied ? TRANSFER_SORTS[requested] : null }, ...result } } } };
+  }
+
+  async function collectTransferBids() {
+    const sourceUrl = "https://vfliga.com/transferlist.php?status=2&day=-3";
+    setStatus("Читаю текущие заявки на покупку…");
+    const doc = await fetchDoc(sourceUrl);
+    if (!doc.querySelector("#transfer_total")) throw new Error("Не удалось прочитать мои заявки. Проверьте авторизацию VFL.");
+    return { kind: "vfl-transfer-bids", exporterVersion: VERSION, generatedAt: new Date().toISOString(),
+      management: { transferMarket: { myBids: parseTransferBids(doc, sourceUrl) } } };
+  }
+
+  function transferUiFilters() {
+    const input = { position: document.querySelector("#vfl-market-position")?.value, style: document.querySelector("#vfl-market-style")?.value };
+    for (const key of Object.keys(TRANSFER_BOUNDS)) input[key] = { min: document.querySelector(`#vfl-market-${key}-min`)?.value, max: document.querySelector(`#vfl-market-${key}-max`)?.value };
+    return input;
+  }
+
   async function collectOwnTeam(maxMatches, depth, clubData = false, management = false) {
     if (!/\/managerzone\.php$/.test(location.pathname)) {
       throw new Error("Откройте https://vfliga.com/managerzone.php");
@@ -1239,7 +1479,7 @@
     const a = document.createElement("a");
     const id = data.teamId || data.opponentId || "context";
     a.href = u;
-    a.download = `${prefix}_${data.depth}_${id}_${new Date().toISOString().slice(0,10)}.json`;
+    a.download = `${prefix}_${data.depth || "query"}_${id}_${new Date().toISOString().slice(0,10)}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -1270,13 +1510,25 @@
       } else if (action === "opponent") {
         data = await collectOpponent(maxMatches, depth);
         prefix = "vfl_opponent_context";
+      } else if (action === "market") {
+        data = await collectTransferMarket(transferUiFilters(), document.querySelector("#vfl-market-sort")?.value || "strength");
+        prefix = "vfl_transfer_market";
+      } else if (action === "bids") {
+        data = await collectTransferBids();
+        prefix = "vfl_transfer_bids";
       } else {
         throw new Error("Неизвестное действие.");
       }
 
       window.__VFL_ASSISTANT_LAST__ = data;
       const size = await saveJson(data, prefix);
-      setStatus(`Готово: ${Math.round(size/1024)} KB. JSON скачан.`, "ok");
+      const search = data.management?.transferMarket?.search;
+      if (search) {
+        const p = search.pagination;
+        setStatus(`Найдено ${p.totalResults} игроков, показаны ${p.shownFrom}–${p.shownTo}. ${search.sort.applied ? "Сортировка применена." : "Одна страница: сортировка не применялась."} JSON скачан.`, "ok");
+      } else if (data.management?.transferMarket?.myBids) {
+        setStatus(`Мои заявки: ${data.management.transferMarket.myBids.bids.length}. JSON скачан.`, "ok");
+      } else setStatus(`Готово: ${Math.round(size/1024)} KB. JSON скачан.`, "ok");
     } catch (e) {
       console.error("[VFL Assistant]", e);
       setStatus(e.message || String(e), "error");
@@ -1328,6 +1580,16 @@
         <b>Собрать ближайшего соперника</b>
         <small>roster + N матчей</small>
       </button>
+
+      <details class="vfl-market">
+        <summary>Трансферный рынок</summary>
+        <div class="vfl-market-row"><label for="vfl-market-position">Позиция</label><select id="vfl-market-position"><option value="">Не важно</option>${TRANSFER_POSITIONS.map(p => `<option value="${p}">${p}</option>`).join("")}</select></div>
+        ${[["age","Возраст"],["price","Цена, тыс."],["strength","Сила"],["askingPercent","% номинала"]].map(([key, label]) => `<div class="vfl-market-row"><span>${label}</span><input id="vfl-market-${key}-min" type="text" inputmode="numeric" placeholder="от" aria-label="${label}: минимум"><span>—</span><input id="vfl-market-${key}-max" type="text" inputmode="numeric" placeholder="до" aria-label="${label}: максимум"></div>`).join("")}
+        <div class="vfl-market-row"><label for="vfl-market-style">Стиль</label><select id="vfl-market-style"><option value="">Не важно</option>${TRANSFER_STYLES.map((label,i) => `<option value="${i+1}">${label}</option>`).join("")}</select></div>
+        <div class="vfl-market-row"><label for="vfl-market-sort">Сортировка</label><select id="vfl-market-sort"><option value="strength">По силе</option><option value="price">По цене</option><option value="specials">По спецвозможностям</option><option value="age">По возрасту</option></select></div>
+        <small>Только первая страница, до 50 игроков. Сортировка применяется при нескольких страницах.</small>
+        <div class="vfl-market-buttons"><button data-action="market">Найти игроков</button><button data-action="bids">Мои заявки</button></div>
+      </details>
 
       <div id="vfl-assistant-status">Открой managerzone.php</div>
       <div class="vfl-assistant-note">
