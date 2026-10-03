@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "VFL Assistant",
+  "version": "0.5.4",
+  "description": "Собирает компактный контекст вашей команды и ближайшего соперника из VFL.",
+  "permissions": [
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "https://vfliga.com/*",
+    "https://www.vfliga.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://vfliga.com/*",
+        "https://www.vfliga.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
