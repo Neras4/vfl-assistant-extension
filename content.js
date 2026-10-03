@@ -3,7 +3,7 @@
   if (window.__VFL_ASSISTANT_V05__) return;
   window.__VFL_ASSISTANT_V05__ = true;
 
-  const VERSION = "0.5.7";
+  const VERSION = "0.5.8";
   const ORIGIN = location.origin;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -887,7 +887,246 @@
     return result;
   }
 
-  async function collectOwnTeam(maxMatches, depth, clubData = false) {
+  function managementText(doc) {
+    return safeBodyText(doc, 200000).replace(/\s+/g, ' ');
+  }
+
+  function managementHeader(doc, name) {
+    const text = managementText(doc);
+    const start = text.indexOf(name);
+    return start < 0 ? '' : text.slice(start, start + 2500);
+  }
+
+  function managementPair(text, label) {
+    const m = text.match(new RegExp(label + '\\s*:\\s*(\\d+)\\s*из\\s*(\\d+)', 'i'));
+    return { remaining: m ? Number(m[1]) : null, total: m ? Number(m[2]) : null };
+  }
+
+  function managementSelectedSeason(doc, name = 'season') {
+    const select = [...doc.querySelectorAll('select')].find(s => s.getAttribute('name') === name);
+    return clubNumber(select?.querySelector('option:checked,option[selected]')?.getAttribute('value') || '');
+  }
+
+  function managementPlayer(row, nameCell, base) {
+    const link = [...row.querySelectorAll('a[href]')].find(a => {
+      const href = absUrl(a.getAttribute('href'), base);
+      return href && new URL(href).pathname === '/player.php' && /^\d+$/.test(param(href, 'num') || '');
+    });
+    const hidden = [...row.querySelectorAll('input')].find(i => /^del_plr_id\[\d+\]$/.test(i.getAttribute('name') || ''));
+    const id = link ? param(absUrl(link.getAttribute('href'), base), 'num') : hidden?.getAttribute('value');
+    return { playerId: /^\d+$/.test(id || '') ? String(id) : null, playerName: clean(domText(link || nameCell)) || null };
+  }
+
+  function managementValue(cell) {
+    const raw = clean(domText(cell));
+    // Short explanatory titles may reveal a range, but tooltip lists/icons do not.
+    const title = cell?.getAttribute('title') || cell?.querySelector('[title]')?.getAttribute('title') || '';
+    return raw || (title && title.length < 150 && !/[<>]/.test(title) ? clean(title) : null);
+  }
+
+  function managementStudyResult(raw) {
+    if (!raw || raw === '-' || raw === '?') return null;
+    const m = raw.match(/^(\d+)\s*из\s*(\d+)$/);
+    return m ? { level: Number(m[1]), maxLevel: Number(m[2]), raw } : { level: null, maxLevel: null, raw };
+  }
+
+  function parseTrainingCenter(doc, sourceUrl) {
+    const text = managementHeader(doc, 'Тренировочный центр');
+    const speed = text.match(/Скорость тренировки:\s*(\d+)\s*%(?:\s*-\s*(\d+)\s*%)?\s*за тур/i);
+    const strength = managementPair(text, 'Осталось тренировок силы');
+    const specials = managementPair(text, 'Осталось спецвозможностей');
+    const positions = managementPair(text, 'Осталось совмещений');
+    const strengthSection = text.match(/Осталось тренировок силы:[\s\S]*?(?=Осталось спецвозможностей|$)/i)?.[0] || '';
+    strength.maxPerPlayer = textNumber(strengthSection, /Одному игроку не более:\s*(\d+)/i);
+    const specialSection = text.match(/Осталось спецвозможностей:[\s\S]*?(?=Осталось совмещений|$)/i)?.[0] || '';
+    specials.maxPerPlayer = textNumber(specialSection, /Одному игроку не более:\s*(\d+)/i);
+    positions.replacementCostUnits = textNumber(text, /1 замена позиции\s*=\s*(\d+)\s*совмещ/i);
+    const costText = text.match(/Стоимость тренировок:([\s\S]*?)(?:Тренировка игроков|Здесь|$)/i)?.[1] || '';
+    const costRange = label => {
+      const m = costText.match(new RegExp(label + ':\\s*([\\d ]+)(?:\\s*-\\s*([\\d ]+))?', 'i'));
+      return { min: m ? clubNumber(m[1]) : null, max: m ? clubNumber(m[2] || m[1]) : null };
+    };
+    const strengthCost = costRange('Сила');
+    const positionCost = costRange('Позиция');
+    const active = [];
+    // Only the target string has been confirmed. Numeric training codes are not decoded.
+    const states = new Map();
+    const rawStates = doc.documentElement.innerHTML.match(/\bvar arr_plr_basetraining\s*=\s*\{([^}]+)\}/)?.[1] || '';
+    for (const m of rawStates.matchAll(/(\d+)\s*:\s*\[([^\]]+)\]/g)) {
+      const args = splitJsArgs(m[2]);
+      if (typeof args[3] === 'string') states.set(m[1], args[3]);
+    }
+    for (const table of sanitizedRoot(doc).querySelectorAll('table')) {
+      const rows = directTableRows(table);
+      if (!rows.some(r => r.children.length === 16 && r.children[8].getAttribute('title') === 'Дней на тренировке' && r.children[9].getAttribute('title') === 'Прогресс тренировки')) continue;
+      for (const row of rows) {
+        const c = [...row.children];
+        if (c.length !== 17) continue;
+        const player = managementPlayer(row, c[2], sourceUrl);
+        if (!player.playerId) continue;
+        active.push({ ...player, trainingType: null, result: states.get(player.playerId) || null,
+          days: clubNumber(clean(domText(c[9]))), progressPercent: clubNumber(clean(domText(c[10]))), cost: clubNumber(clean(domText(c[7]))) });
+      }
+    }
+    return { sourceUrl, collectedAt: new Date().toISOString(), center: {
+      level: textNumber(text, /Уровень:\s*(\d+)/i),
+      speedPercentPerTour: speed && !speed[2] ? Number(speed[1]) : null,
+      speedPercentRange: { min: speed ? Number(speed[1]) : null, max: speed ? Number(speed[2] || speed[1]) : null },
+      capacity: { currentPlayers: textNumber(text, /Игроков на тренировке:\s*(\d+)\s*из/i), maxPlayers: textNumber(text, /Игроков на тренировке:\s*\d+\s*из\s*(\d+)/i) },
+      resources: { strength, specials, positions },
+      costs: { strength: strengthCost.min === strengthCost.max ? strengthCost.min : null, strengthMin: strengthCost.min, strengthMax: strengthCost.max,
+        special: textNumber(costText, /Спецвозможность:\s*([\d ]+)/i), positionMin: positionCost.min, positionMax: positionCost.max }
+    }, active, history: [] };
+  }
+
+  function parseTrainingHistory(doc, sourceUrl, season) {
+    const events = [];
+    for (const table of sanitizedRoot(doc).querySelectorAll('table')) {
+      const rows = directTableRows(table);
+      if (!rows.some(r => r.children.length === 10 && r.children[8].getAttribute('title') === 'Описание проведенной тренировки')) continue;
+      for (const row of rows) {
+        const c = [...row.children];
+        if (c.length !== 11 || !/^Сезон:/.test(c[0].getAttribute('title') || '')) continue;
+        if (clubNumber(clean(domText(c[0]))) !== season) continue;
+        const player = managementPlayer(row, c[3], sourceUrl);
+        if (!player.playerId) continue;
+        events.push({ ...player, season, day: clubNumber(clean(domText(c[1]))), date: clean(domText(c[2])) || null,
+          result: clean(domText(c[9])) || null, cost: clubNumber(clean(domText(c[10]))) });
+      }
+    }
+    return events;
+  }
+
+  function parseScoutingCenter(doc, sourceUrl) {
+    const text = managementHeader(doc, 'Скаут-центр');
+    const active = [];
+    for (const table of sanitizedRoot(doc).querySelectorAll('table')) {
+      const rows = directTableRows(table);
+      if (!rows.some(r => r.children.length === 16 && clean(domText(r.children[9])) === 'Изучает' && r.children[13].getAttribute('title') === 'Прогресс изучения')) continue;
+      for (const row of rows) {
+        const c = [...row.children];
+        if (c.length !== 17) continue;
+        const player = managementPlayer(row, c[2], sourceUrl);
+        if (!player.playerId) continue;
+        active.push({ ...player, studyType: clean(domText(c[10])) || null,
+          currentValue: managementValue(c[11]), expectedValue: managementValue(c[12]),
+          turns: clubNumber(clean(domText(c[13]))), progressPercent: clubNumber(clean(domText(c[14]))) });
+      }
+    }
+    return { sourceUrl, collectedAt: new Date().toISOString(), center: {
+      level: textNumber(text, /Уровень:\s*(\d+)/i),
+      speedPercent: { min: textNumber(text, /Скорость изучения:\s*(\d+)\s*%/i), max: textNumber(text, /Скорость изучения:\s*\d+\s*%\s*-\s*(\d+)\s*%/i) },
+      costPerStudy: textNumber(text, /Стоимость любого изучения:\s*([\d ]+)/i)
+    }, resources: {
+      styles: managementPair(text, 'Осталось изучений стилей'), growth: managementPair(text, 'Осталось изучений роста силы'),
+      decline: managementPair(text, 'Осталось изучений потери силы'), injury: managementPair(text, 'Осталось изучений травматичности'), loyalty: managementPair(text, 'Осталось изучений лояльности')
+    }, active, completed: [] };
+  }
+
+  function parseScoutingHistory(doc, sourceUrl) {
+    const active = [], completed = [];
+    for (const table of sanitizedRoot(doc).querySelectorAll('table')) {
+      const rows = directTableRows(table);
+      const section = rows.find(r => r.children.length === 1)?.children[0];
+      const label = clean(domText(section));
+      if (!/^(На изучении|Завершено изучений):$/.test(label)) continue;
+      for (const row of rows) {
+        const c = [...row.children];
+        if (c.length !== 4) continue;
+        const current = label === 'На изучении:';
+        const player = managementPlayer(row, c[current ? 0 : 1], sourceUrl);
+        if (!player.playerId) continue;
+        if (current) active.push({ ...player, studyType: clean(domText(c[1])) || null, progressPercent: clubNumber(clean(domText(c[2]))), days: clubNumber(clean(domText(c[3]))) });
+        else completed.push({ ...player, date: clean(domText(c[0])) || null, studyType: clean(domText(c[2])) || null, result: managementStudyResult(clean(domText(c[3]))) });
+      }
+    }
+    return { active, completed };
+  }
+
+  function managementForm(cell) {
+    const title = cell?.getAttribute('title') || cell?.querySelector('[title]')?.getAttribute('title') || '';
+    const raw = clean(title || domText(cell));
+    const m = raw.match(/^(\d+)%,\s*(раст[её]т|падает)$/i);
+    return m ? { percent: Number(m[1]), trend: /раст/i.test(m[2]) ? 'rising' : 'falling' } : null;
+  }
+
+  function parseFitnessCenter(doc, sourceUrl) {
+    const text = managementHeader(doc, 'Центр физподготовки');
+    const changes = managementPair(text, 'Осталось изменений физ\\. формы');
+    changes.planned = textNumber(text, /Запланировано всего изменений:\s*(\d+)/i);
+    changes.nextGameDay = textNumber(text, /В ближайший игровой день:\s*(\d+)/i);
+    return { sourceUrl, collectedAt: new Date().toISOString(), center: {
+      level: textNumber(text, /Уровень:\s*(\d+)/i), fatigueRecoveryBonusPercent: textNumber(text, /Усталость восстанавливается на\s*(\d+)\s*%\s*лучше/i), changes
+    }, planned: [], completed: [], cancelled: [] };
+  }
+
+  function parseFitnessHistory(doc, sourceUrl, season) {
+    const out = { planned: [], completed: [], cancelled: [], scopeWarnings: [] };
+    for (const table of sanitizedRoot(doc).querySelectorAll('table')) {
+      const rows = directTableRows(table);
+      const header = rows.find(r => r.children.length === 9 && clean(domText(r.children[7])) === 'Было');
+      if (!header) continue;
+      const last = clean(domText(header.children[8]));
+      const key = { 'Будет': 'planned', 'Стало': 'completed', 'Ошибка': 'cancelled' }[last];
+      if (!key) continue;
+      for (const row of rows) {
+        const c = [...row.children];
+        if (c.length !== 10) continue;
+        const player = managementPlayer(row, c[2], sourceUrl);
+        if (!player.playerId) continue;
+        // page=2 has no season selector. Never assume that an undated past event
+        // belongs to the current season. Future plans are the current operational state.
+        const rowSeason = [...row.querySelectorAll('[title]')].map(n => n.getAttribute('title')).join(' ').match(/Сезон:\s*(\d+)/i);
+        if (rowSeason && Number(rowSeason[1]) !== season) continue;
+        if (key !== 'planned' && !rowSeason) {
+          if (!out.scopeWarnings.includes('Прошедшие изменения формы без подтверждённого сезона исключены.')) out.scopeWarnings.push('Прошедшие изменения формы без подтверждённого сезона исключены.');
+          continue;
+        }
+        const event = { ...player, day: clubNumber(clean(domText(c[0]))), date: clean(domText(c[1])) || null, oldForm: managementForm(c[8]) };
+        if (key === 'cancelled') event.error = clean(domText(c[9])) || null;
+        else event.newForm = managementForm(c[9]);
+        out[key].push(event);
+      }
+    }
+    return out;
+  }
+
+  async function collectManagement(teamId, season) {
+    if (!Number.isInteger(season) || season < 1) throw new Error('Не удалось подтвердить текущий сезон для Management.');
+    const pages = {};
+    const paths = {
+      training: '/mng_base_train.php', trainingHistory: `/mng_base_train_history.php?a=${season}&b=${season}`,
+      scouting: '/mng_scout_styles.php', scoutingHistory: `/mng_scout_styles_history.php?season=${season}`,
+      fitness: '/mng_base_ch.php?page=1', fitnessHistory: '/mng_base_ch.php?page=2'
+    };
+    for (const [key, path] of Object.entries(paths)) {
+      setStatus(`Менеджмент команды: ${key}…`);
+      const url = ORIGIN + path;
+      const doc = await fetchDoc(url);
+      const linkIds = collectLinks(doc, url).filter(l => new URL(l.href).pathname === '/roster.php').map(l => param(l.href, 'num')).filter(Boolean);
+      const actualId = teamIdFromManager(doc) || linkIds[0];
+      if (actualId !== String(teamId)) throw new Error('Активная команда изменилась при сборе менеджмента. Повторите сбор.');
+      pages[key] = { doc, url };
+    }
+    const th = pages.trainingHistory, sh = pages.scoutingHistory;
+    if (managementSelectedSeason(th.doc, 'a') !== season || managementSelectedSeason(th.doc, 'b') !== season || managementSelectedSeason(sh.doc) !== season) throw new Error('Management history: выбран не текущий сезон. Повторите сбор.');
+    const training = parseTrainingCenter(pages.training.doc, pages.training.url);
+    training.history = parseTrainingHistory(th.doc, th.url, season);
+    training.historySourceUrl = th.url;
+    training.season = season;
+    const scouting = parseScoutingCenter(pages.scouting.doc, pages.scouting.url);
+    const scoutHistory = parseScoutingHistory(sh.doc, sh.url);
+    const current = new Map(scouting.active.map(p => [p.playerId, p]));
+    for (const p of scoutHistory.active) current.set(p.playerId, { ...current.get(p.playerId), ...p });
+    scouting.active = [...current.values()];
+    scouting.completed = scoutHistory.completed;
+    scouting.historySourceUrl = sh.url;
+    scouting.season = season;
+    const fitness = { ...parseFitnessCenter(pages.fitness.doc, pages.fitness.url), ...parseFitnessHistory(pages.fitnessHistory.doc, pages.fitnessHistory.url, season), historySourceUrl: pages.fitnessHistory.url, season };
+    return { training, scouting, fitness };
+  }
+
+  async function collectOwnTeam(maxMatches, depth, clubData = false, management = false) {
     if (!/\/managerzone\.php$/.test(location.pathname)) {
       throw new Error("Откройте https://vfliga.com/managerzone.php");
     }
@@ -923,6 +1162,7 @@
       generatedAt: new Date().toISOString(),
       teamId,
       clubDataIncluded: Boolean(clubData),
+      managementIncluded: Boolean(management),
       sourceUrl: location.href,
       team: parseManagerCore(currentDoc),
       roster,
@@ -939,6 +1179,7 @@
     }
 
     if (clubData) Object.assign(result, await collectClubData(teamId));
+    if (management) result.management = await collectManagement(teamId, rosterScope(currentDoc).season);
     return result;
   }
 
@@ -1024,7 +1265,7 @@
 
       let data, prefix;
       if (action === "team") {
-        data = await collectOwnTeam(maxMatches, depth, Boolean(document.querySelector("#vfl-club-data")?.checked));
+        data = await collectOwnTeam(maxMatches, depth, Boolean(document.querySelector("#vfl-club-data")?.checked), Boolean(document.querySelector("#vfl-management")?.checked));
         prefix = "vfl_team_context";
       } else if (action === "opponent") {
         data = await collectOpponent(maxMatches, depth);
@@ -1071,6 +1312,11 @@
       <label class="vfl-club-data" title="Только для моей команды">
         <input id="vfl-club-data" type="checkbox">
         <span>Данные клуба<small>Финансы, история сделок и командная статистика<br>Только для моей команды</small></span>
+      </label>
+
+      <label class="vfl-club-data" title="Только для моей команды">
+        <input id="vfl-management" type="checkbox">
+        <span>Менеджмент команды<small>Тренировки, скаутинг и физическая форма<br>Только для моей команды</small></span>
       </label>
 
       <button data-action="team">
