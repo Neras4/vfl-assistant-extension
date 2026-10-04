@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(__dirname + '/content.js', 'utf8');
-const exposed = source.slice(0, source.indexOf('  const panel =')) + '\n window.test = {extractJPlayers,parseRecentPlayerMatches,parsePlayerInfo,parsePlayerStats,parsePlayerContract,mergePlayerDetails,domText,collectLinks,rosterCompact,playerIds,parseManagerCore,deepPlayerScan,collectOwnTeam,collectOpponent,pickMatches,safeBodyText,clubNumber,parseClubFinances,parseClubDeals,parseTeamStatistics,collectClubData,parseTrainingCenter,parseTrainingHistory,parseScoutingCenter,parseScoutingHistory,parseFitnessCenter,parseFitnessHistory,collectManagement,managementForm,transferFilters,transferTradeDay,TRANSFER_POSITION_LABELS,transferUiFilters,transferSearchUrl,parseTransferSearch,parseTransferBids,collectTransferMarket,collectTransferBids,TRANSFER_SORTS, mockMarket:(docs,requests,current)=>{document=current;location.pathname=current?"/transferlist.php":"/managerzone.php";setStatus=()=>{};fetchDoc=async url=>{requests.push(url);return docs.shift();};}, mockCollectors: (display,current,opponent,profile,clubDocs={},requests=[]) => { document=display; setStatus=()=>{}; nearestOpponentRosterUrl=()=>ORIGIN+"/roster.php?num=12345"; fetchDoc=async url=>{requests.push(url);return clubDocs[new URL(url).pathname+"?page="+new URL(url).searchParams.get("page")] || clubDocs[new URL(url).pathname] || clubDocs[new URL(url).searchParams.get("pm")] || (/player_(stats|contracts)\.php/.test(url)?clubDocs[new URL(url).pathname]:url.includes("player.php")?profile:url.includes("sort=300")?current:url.includes("roster.php")?opponent:display);}; fetchMatches=async()=>[]; }, mockDeep: (fixture,requests) => { setStatus = () => {}; fetchDoc = async url => { requests.push(url); return fixture; }; }};})();';
+const exposed = source.slice(0, source.indexOf('  const panel =')) + '\n window.test = {extractJPlayers,parseRecentPlayerMatches,parsePlayerInfo,parsePlayerStats,parsePlayerContract,mergePlayerDetails,domText,collectLinks,rosterCompact,playerIds,parseManagerCore,parseRosterSeasonStats,deepPlayerScan,collectOwnTeam,collectOpponent,pickMatches,safeBodyText,clubNumber,parseClubFinances,parseClubDeals,parseTeamStatistics,collectClubData,parseTrainingCenter,parseTrainingHistory,parseScoutingCenter,parseScoutingHistory,parseFitnessCenter,parseFitnessHistory,collectManagement,managementForm,transferFilters,transferTradeDay,TRANSFER_POSITION_LABELS,transferUiFilters,transferSearchUrl,parseTransferSearch,parseTransferBids,collectTransferMarket,collectTransferBids,TRANSFER_SORTS, mockMarket:(docs,requests,current)=>{document=current;location.pathname=current?"/transferlist.php":"/managerzone.php";setStatus=()=>{};fetchDoc=async url=>{requests.push(url);return docs.shift();};}, mockCollectors: (display,current,opponent,profile,clubDocs={},requests=[]) => { document=display; setStatus=()=>{}; nearestOpponentRosterUrl=()=>ORIGIN+"/roster.php?num=12345"; fetchDoc=async url=>{requests.push(url);return clubDocs[new URL(url).pathname+"?page="+new URL(url).searchParams.get("page")] || clubDocs[new URL(url).pathname] || clubDocs[new URL(url).searchParams.get("pm")] || (/player_(stats|contracts)\.php/.test(url)?clubDocs[new URL(url).pathname]:url.includes("player.php")?profile:url.includes("sort=300")?current:url.includes("roster.php")?opponent:display);}; fetchMatches=async()=>[]; }, mockDeep: (fixture,requests) => { setStatus = () => {}; fetchDoc = async url => { requests.push(url); return fixture; }; }};})();';
 const context = {window:{}, location:{origin:'https://vfliga.com',href:'https://vfliga.com/managerzone.php',pathname:'/managerzone.php'}, URL, Map, Set};
 vm.runInNewContext(exposed, context);
 const t = context.window.test;
@@ -218,12 +218,25 @@ t.deepPlayerScan(roster,'Synthetic opponent',id=>'https://vfliga.com/player.php?
   assert.equal(context.window.requests.some(u=>/player_(stats|contracts)\.php/.test(u)),false);
   for(const player of details){assert.equal('stats' in player,false);assert.equal('contract' in player,false);assert.equal(player.info.recentMatches.length,2);}
   const ownDisplay=documentWith([],playerLine+';var curr=12345;var sort=1;');
-  const ownCurrent=documentWith([node('div','Финансы: 5 000'),node('div','Рейтинг силы команды (Vs): 100')],playerLine+';var curr=12345;var sort=300;var tek_season=60;');
+  const seasonArgs=[...args];Object.assign(seasonArgs,{52:9,53:10,54:4,55:2,56:1,57:6.59});
+  const seasonLine='new jPlayer('+seasonArgs.map(JSON.stringify).join(',')+')';
+  const ownCurrent=documentWith([node('div','Финансы: 5 000'),node('div','Рейтинг силы команды (Vs): 100')],seasonLine+';var curr=12345;var sort=300;var tek_season=60;');
+  const expectedSeason={scope:{label:'по всем турнирам',season:60,sort:300},players:[{playerId:'123456',averageRating:6.59,games:9,goals:10,assists:4,yellowCards:2,redCards:1}]};
+  assert.deepEqual(JSON.parse(JSON.stringify(t.parseRosterSeasonStats(ownCurrent,t.rosterCompact(ownCurrent,'12345')))),expectedSeason);
+  assert.throws(()=>t.parseRosterSeasonStats(ownDisplay,t.rosterCompact(ownDisplay,'12345')),/по всем турнирам/);
+  assert.throws(()=>t.parseRosterSeasonStats(documentWith([],'var sort=300'),{players:[]}),/по всем турнирам/);
+  const incomplete=t.parseRosterSeasonStats(ownCurrent,{players:[{id:'777777',selectedStats:{games:0,goals:NaN,averageRating:-1}},{id:'888888',selectedStats:null}]});
+  assert.equal(incomplete.players[0].games,0);assert.equal(incomplete.players[0].goals,null);assert.equal(incomplete.players[0].averageRating,null);assert.equal(incomplete.players[1].assists,null);
   const requests=[];
   t.mockCollectors(ownDisplay,ownCurrent,opponentDoc,deepProfile,{6:financeDoc,4:dealsDoc,3:rankingDoc,'/player_stats.php':statsDoc,'/player_contracts.php':expandedContractDoc},requests);
   for(const depth of ['normal','deep']) {
     const ownBefore=requests.length;
     const own=await t.collectOwnTeam(1,depth);
+    assert.deepEqual(JSON.parse(JSON.stringify(own.rosterSeasonStats)),expectedSeason);
+    const ownRequests=requests.slice(ownBefore);
+    assert.equal(ownRequests.filter(u=>new URL(u).pathname==='/managerzone.php'&&new URL(u).searchParams.get('sort')==='300').length,1);
+    assert.equal(ownRequests.length,depth==='deep'?5:2); // Reuse the existing state snapshot: zero extra HTTP requests.
+    assert.equal(own.roster.players[0].selectedStats.games,4);assert.equal(own.rosterSeasonStats.players[0].games,9);
     const ownPlayerRequests=requests.slice(ownBefore).filter(u=>/\/player(?:_stats|_contracts)?\.php/.test(u));
     assert.equal(ownPlayerRequests.length,depth==='deep'?3:0);
     if(depth==='deep'){assert.equal(own.playerDetails[0].stats.total.games,5);assert.equal(own.playerDetails[0].contract.renewal.adjustmentPercent,-18);assert.equal(own.playerDetails[0].info.recentMatches.length,1);}
@@ -243,6 +256,7 @@ t.deepPlayerScan(roster,'Synthetic opponent',id=>'https://vfliga.com/player.php?
     const opponent=await t.collectOpponent(1,depth,true);
     for(const key of ['finances','deals','teamStatistics','clubDataIncluded','managementIncluded','management'])assert.equal(key in opponent,false);
     assert.equal(requests.slice(before).some(url=>/[?&]pm=(3|4|6)(?:&|$)/.test(url)),false);
+    assert.equal('rosterSeasonStats' in opponent,false);assert.equal(requests.slice(before).some(u=>new URL(u).searchParams.get('sort')==='300'),false);
     assert.equal(opponent.roster.playerIds.length,28);
     assert.equal(requests.slice(before).filter(u=>/\/player(?:_stats|_contracts)?\.php/.test(u)).length,depth==='deep'?28:0);
     assert.equal(requests.slice(before).some(u=>/player_(stats|contracts)\.php/.test(u)),false);
@@ -267,7 +281,7 @@ t.deepPlayerScan(roster,'Synthetic opponent',id=>'https://vfliga.com/player.php?
   const largeDisplay=documentWith([],many.join(';')+';var curr=12345;var sort=1;var tek_season=60;');
   const largeCurrent=documentWith([],many.join(';')+';var curr=12345;var sort=300;var tek_season=60;');
   const largeRequests=[];t.mockCollectors(largeDisplay,largeCurrent,opponentDoc,deepProfile,managementDocs,largeRequests);
-  const largeOwn=await t.collectOwnTeam(2,'normal',false,true);assert.equal(largeOwn.roster.players.length,28);assert.equal(largeRequests.filter(u=>/\/mng_/.test(u)).length,6);assert.equal(largeRequests.some(u=>/\/player(?:_stats|_contracts)?\.php/.test(u)),false);
+  const largeOwn=await t.collectOwnTeam(2,'normal',false,true);assert.equal(largeOwn.roster.players.length,28);assert.equal(largeOwn.rosterSeasonStats.players.length,28);assert.deepEqual(Array.from(largeOwn.rosterSeasonStats.players,p=>p.playerId),Array.from(largeOwn.roster.playerIds));assert.equal(largeRequests.filter(u=>/\/mng_/.test(u)).length,6);assert.equal(largeRequests.some(u=>/\/player(?:_stats|_contracts)?\.php/.test(u)),false);
   const failureRequests=[];t.mockCollectors(ownDisplay,ownCurrent,opponentDoc,deepProfile,{...managementDocs,'/mng_scout_styles.php':documentWith([],'var curr=99999;')},failureRequests);
   await assert.rejects(t.collectOwnTeam(2,'normal',false,true),/Активная команда изменилась/);
   const oldHistoryDoc=documentWith([node('select','',{name:'season'},[node('option','59',{value:'59',selected:''})])],'var curr=12345;');
@@ -347,8 +361,25 @@ t.deepPlayerScan(roster,'Synthetic opponent',id=>'https://vfliga.com/player.php?
   const bidDoc=documentWith([node('select','',{id:'transfer_total'},[node('option','5',{value:'5',selected:''})]),...['GK','LD','CD','RD','LM','CM','RM','LF','CF','RF'].map(key=>node('select','',{id:'transfer_'+key.toLowerCase()},[node('option','1',{value:'1',selected:''})])),node('table','',{},[bidHeader,tr([node('td','Synthetic auction',{title:'День 30',colspan:'5'}),node('td','Synthetic competition',{colspan:'12'})]),bidRow('910001'),bidPrice(0,'11500','41%'),bidRow('910002'),bidPrice(1,'8500','46%'),bidRow('910003'),bidPrice(2,'?','?')])]);
   const bids=t.parseTransferBids(bidDoc,'https://vfliga.com/transferlist.php?status=2&day=-3');assert.equal(bids.bids.length,3);assert.equal(bids.purchaseLimits.total,5);for(const key of ['GK','LD','CD','RD','LM','CM','RM','LF','CF','RF'])assert.equal(bids.purchaseLimits[key],1);
   assert.equal(bids.bids[0].bidPrice,11500000);assert.equal(bids.bids[0].bidPercent,41);assert.equal(bids.bids[1].bidPrice,8500000);assert.equal(bids.bids[0].askingPrice,41861000);assert.equal(bids.bids[0].auction.day,30);assert.equal(bids.bids[0].auction.competition,'Synthetic competition');assert.equal(bids.bids[2].bidPrice,null);assert.equal(bids.bids[2].bidPercent,null);assert.equal('status' in bids.bids[0],false);
+  for(const b of bids.bids){assert.equal(b.bidType,'active');assert.equal(b.preliminaryBidPrice,null);assert.equal(b.currentBidPrice,null);assert.equal(b.currentBidPercent,null);}
+  const preliminary=(id,previous,current,percent,label='Предв. заявка:')=>tr(['',node('td',label+' 000, актуальная: 000',{},[node('span',previous,{id:'predv_price_'+id}),node('span','актуальная: 000', {id:'td_price_'+id},[node('input','',{id:'price_'+id,value:current}),node('span',percent,{id:'percent_'+id})])])]);
+  const typesDoc=documentWith([node('table','',{},[bidHeader,tr([node('td','6 октября, 22:00',{title:'День 41'}),td('Synthetic future auction')]),bidRow('920001'),bidPrice(0,'3500','46%'),bidRow('920002'),preliminary(1,'5 600','5600','68%'),bidRow('920003'),preliminary(2,'?','?','?','Пред. заявка:'),bidRow('920004'),tr(['',td('Предв. заявка: ?, актуальная: ?')]),bidRow('920005')])]);
+  const typed=t.parseTransferBids(typesDoc,'https://vfliga.com/transferlist.php?status=2&day=-3').bids;
+  assert.equal(typed[0].bidType,'active');assert.equal(typed[0].bidPrice,3500000);assert.equal(typed[0].bidPercent,46);
+  assert.equal(typed[1].bidType,'preliminary');assert.equal(typed[1].preliminaryBidPrice,5600000);assert.equal(typed[1].currentBidPrice,5600000);assert.equal(typed[1].currentBidPercent,68);assert.equal(typed[1].bidPrice,null);assert.equal(typed[1].bidPercent,null);
+  assert.deepEqual(JSON.parse(JSON.stringify(typed[1].bidRaw)),{preliminaryPrice:'5 600',currentPrice:'5600',currentPercent:'68%'});
+  assert.deepEqual(JSON.parse(JSON.stringify(typed[1].auction)),{day:41,date:'6 октября, 22:00',competition:'Synthetic future auction'});
+  for(const i of [2,3]){assert.equal(typed[i].bidType,'preliminary');for(const key of ['bidPrice','bidPercent','preliminaryBidPrice','currentBidPrice','currentBidPercent'])assert.equal(typed[i][key],null);}
+  const missingPrevious=preliminary(0,'','5600','68%');
+  const missingCurrent=preliminary(0,'5 600','','?');
+  const onlyPrevious=tr(['',node('td','Предв. заявка: 000',{},[node('span','5 600',{id:'predv_price_0'})])]);
+  for(const [row,expected] of [[missingPrevious,[null,5600000,68]],[missingCurrent,[5600000,null,null]],[onlyPrevious,[5600000,null,null]]]){
+    const b=t.parseTransferBids(documentWith([node('table','',{},[bidHeader,bidRow('920010'),row])]),'https://vfliga.com/transferlist.php?status=2').bids[0];
+    assert.equal(b.preliminaryBidPrice,expected[0]);assert.equal(b.currentBidPrice,expected[1]);assert.equal(b.currentBidPercent,expected[2]);assert.equal(b.bidPrice,null);assert.equal(b.bidPercent,null);
+  }
+  assert.equal(typed[4].bidType,null);assert.equal(typed[4].currentBidPrice,null);
   const bidsReq=[];t.mockMarket([bidDoc],bidsReq);const bidsExport=await t.collectTransferBids();assert.equal(bidsReq.length,1);assert.equal(new URL(bidsReq[0]).searchParams.get('status'),'2');assert.equal(bidsExport.management.transferMarket.myBids.bids.length,3);assert.equal('search' in bidsExport.management.transferMarket,false);
   assert.equal(t.parseTransferBids(documentWith([]),'https://vfliga.com').purchaseLimits.GK,null);
   assert.equal(/change_transfer_pos|method\s*:\s*["']POST|DelMyTransferRequest|EditMyTransferRequest/.test(source),false);
-  console.log('PASS: today trade day and safe errors/form reuse/bootstrap, readable native positions, multi-style filters/export/UI, transfer filters/defaults/6 styles/17 positions, 4 live native sorts, one-page 1 request, multi-page 2 requests, first 50 only, 0 player requests, market/bid layouts, unknown/raw values and safe links, read-only bid limits/prices; all existing Management, own/opponent deep, clubData, current-season, roster and security regressions.');
+  console.log('PASS: active/preliminary bids and future auctions; own Normal/Deep all-tournament rosterSeasonStats independent of selectedStats, reuse of single sort=300 request; today trade day and safe errors/form reuse/bootstrap, readable native positions, multi-style filters/export/UI, transfer filters/defaults/6 styles/17 positions, 4 live native sorts, one-page 1 request, multi-page 2 requests, first 50 only, 0 player requests, market/bid layouts, unknown/raw values and safe links, read-only bid limits/prices; all existing Management, own/opponent deep, clubData, current-season, roster and security regressions.');
 }).catch(error=>{console.error(error);process.exitCode=1;});
