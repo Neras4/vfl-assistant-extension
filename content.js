@@ -3,7 +3,7 @@
   if (window.__VFL_ASSISTANT_V05__) return;
   window.__VFL_ASSISTANT_V05__ = true;
 
-  const VERSION = "0.5.9";
+  const VERSION = "0.5.10";
   const ORIGIN = location.origin;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -1130,11 +1130,12 @@
   // Empty bounds are submitted exactly as the native search form submits them:
   // VFL normalizes them itself (including its special unrestricted maxP value).
   const TRANSFER_POSITIONS = ["GK","XX","DF","MD","FW","R","L","C","LD","CD","RD","LM","CM","RM","LF","CF","RF"];
+  const TRANSFER_POSITION_LABELS = { GK: "GK — вратарь", XX: "XX — полевой игрок", DF: "DF — защитник", MD: "MD — полузащитник", FW: "FW — нападающий", R: "R — правый фланг", L: "L — левый фланг", C: "C — центр" };
   const TRANSFER_STYLES = ["Спартаковский","Бей-беги","Бразильский","Тики-така","Катеначчо","Британский"];
   const TRANSFER_SORTS = { strength: 5, price: 7, specials: 13, age: 3 };
   const TRANSFER_BOUNDS = { age: ["minA","maxA"], price: ["minS","maxS"], strength: ["minP","maxP"], askingPercent: ["minX","maxX"] };
   const TRANSFER_DEFAULTS = {
-    find_load: "1", status: "1", page: "1", day: "-3", sstyle: "1", sort: "7",
+    find_load: "1", status: "1", page: "1", sstyle: "1", sort: "7",
     pz1: "", pz2: "", andor: "and", rf1: "1", rf2: "1", rf3: "1",
     sp1: "", sp2: "", sp3: "", sp4: "", nat_id: "", minN: "", maxN: "",
     minRS: "", maxRS: "", minPS: "", maxPS: "", minTS: "", maxTS: "", minGS: "", maxGS: "",
@@ -1145,9 +1146,9 @@
   function transferFilters(input = {}) {
     const position = clean(String(input.position ?? ""));
     if (position && !TRANSFER_POSITIONS.includes(position)) throw new Error("Неизвестная позиция рынка.");
-    const style = input.style === "" || input.style == null ? null : Number(input.style);
-    if (style !== null && (!Number.isInteger(style) || style < 1 || style > 6)) throw new Error("Неизвестный стиль рынка.");
-    const filters = { position: position || null, style };
+    const styles = input.styles ?? [];
+    if (!Array.isArray(styles) || styles.length > 6 || styles.some(id => !Number.isInteger(id) || id < 1 || id > 6)) throw new Error("Стили рынка должны быть списком ID от 1 до 6.");
+    const filters = { position: position || null, styles: [...new Set(styles)] };
     for (const key of Object.keys(TRANSFER_BOUNDS)) {
       const pair = {};
       for (const bound of ["min", "max"]) {
@@ -1162,14 +1163,24 @@
     return filters;
   }
 
-  function transferSearchUrl(filters, nativeSort = null) {
+  function transferTradeDay(doc) {
+    const select = doc.querySelector('select[name="day"]');
+    const today = [...(select?.querySelectorAll("option") || [])].filter(o => /^сегодня,\s*/i.test(clean(o.textContent)));
+    const value = today.length === 1 ? today[0].getAttribute("value") : null;
+    if (!value || !/^[1-9]\d*$/.test(value)) throw new Error("Не удалось определить сегодняшние торги. Откройте актуальную страницу трансферного рынка VFL и повторите поиск.");
+    return value;
+  }
+
+  function transferSearchUrl(filters, nativeSort = null, tradeDay) {
+    if (!/^[1-9]\d*$/.test(String(tradeDay ?? ""))) throw new Error("Не определён сегодняшний торговый день.");
     const url = new URL("https://vfliga.com/transferlist.php");
     for (const [key, value] of Object.entries(TRANSFER_DEFAULTS)) url.searchParams.set(key, value);
+    url.searchParams.set("day", tradeDay);
     url.searchParams.set("pz1", filters.position || "");
     for (const [key, params] of Object.entries(TRANSFER_BOUNDS)) {
       ["min", "max"].forEach((bound, i) => url.searchParams.set(params[i], filters[key][bound] ?? ""));
     }
-    for (let id = 1; id <= 6; id++) url.searchParams.set(`plr_style_${id}`, filters.style === id ? "1" : "0");
+    for (let id = 1; id <= 6; id++) url.searchParams.set(`plr_style_${id}`, filters.styles.includes(id) ? "1" : "0");
     if (nativeSort !== null) {
       if (!Object.values(TRANSFER_SORTS).includes(nativeSort)) throw new Error("Неизвестная сортировка рынка.");
       url.searchParams.set("sort", nativeSort);
@@ -1335,12 +1346,17 @@
     if (!Object.hasOwn(TRANSFER_SORTS, requested)) throw new Error("Неизвестная сортировка рынка.");
     const filters = transferFilters(input);
     setStatus("Ищу игроков на трансферном рынке…");
-    let sourceUrl = transferSearchUrl(filters);
+    // Reuse the live market form; away from the market, load it once to resolve
+    // today's native day. No date guessing and no player-level requests.
+    const formDoc = /\/transferlist\.php$/.test(location.pathname) && document.querySelector('select[name="day"]')
+      ? document : await fetchDoc("https://vfliga.com/transferlist.php");
+    const tradeDay = transferTradeDay(formDoc);
+    let sourceUrl = transferSearchUrl(filters, null, tradeDay);
     let result = parseTransferSearch(await fetchDoc(sourceUrl), sourceUrl);
     if (result.pagination.totalPages === null) throw new Error("Не удалось прочитать количество результатов рынка. Проверьте авторизацию VFL.");
     let applied = false;
     if (result.pagination.totalPages > 1) {
-      sourceUrl = transferSearchUrl(filters, TRANSFER_SORTS[requested]);
+      sourceUrl = transferSearchUrl(filters, TRANSFER_SORTS[requested], tradeDay);
       setStatus("Применяю сортировку к первой странице рынка…");
       result = parseTransferSearch(await fetchDoc(sourceUrl), sourceUrl);
       if (result.pagination.totalPages === null) throw new Error("Не удалось прочитать отсортированный результат рынка.");
@@ -1348,7 +1364,7 @@
     }
     return { kind: "vfl-transfer-market", exporterVersion: VERSION, generatedAt: new Date().toISOString(),
       management: { transferMarket: { sourceUrl, collectedAt: new Date().toISOString(), search: {
-        filters, sort: { requested, applied, nativeSort: applied ? TRANSFER_SORTS[requested] : null }, ...result } } } };
+        filters: { ...filters, styles: filters.styles.map(id => ({ id, label: TRANSFER_STYLES[id - 1] })) }, sort: { requested, applied, nativeSort: applied ? TRANSFER_SORTS[requested] : null }, ...result } } } };
   }
 
   async function collectTransferBids() {
@@ -1361,7 +1377,7 @@
   }
 
   function transferUiFilters() {
-    const input = { position: document.querySelector("#vfl-market-position")?.value, style: document.querySelector("#vfl-market-style")?.value };
+    const input = { position: document.querySelector("#vfl-market-position")?.value, styles: TRANSFER_STYLES.flatMap((_, i) => document.querySelector(`#vfl-market-style-${i + 1}`)?.checked ? [i + 1] : []) };
     for (const key of Object.keys(TRANSFER_BOUNDS)) input[key] = { min: document.querySelector(`#vfl-market-${key}-min`)?.value, max: document.querySelector(`#vfl-market-${key}-max`)?.value };
     return input;
   }
@@ -1583,9 +1599,9 @@
 
       <details class="vfl-market">
         <summary>Трансферный рынок</summary>
-        <div class="vfl-market-row"><label for="vfl-market-position">Позиция</label><select id="vfl-market-position"><option value="">Не важно</option>${TRANSFER_POSITIONS.map(p => `<option value="${p}">${p}</option>`).join("")}</select></div>
+        <div class="vfl-market-row"><label for="vfl-market-position">Позиция</label><select id="vfl-market-position"><option value="">Не важно</option>${TRANSFER_POSITIONS.map(p => `<option value="${p}">${TRANSFER_POSITION_LABELS[p] || p}</option>`).join("")}</select></div>
         ${[["age","Возраст"],["price","Цена, тыс."],["strength","Сила"],["askingPercent","% номинала"]].map(([key, label]) => `<div class="vfl-market-row"><span>${label}</span><input id="vfl-market-${key}-min" type="text" inputmode="numeric" placeholder="от" aria-label="${label}: минимум"><span>—</span><input id="vfl-market-${key}-max" type="text" inputmode="numeric" placeholder="до" aria-label="${label}: максимум"></div>`).join("")}
-        <div class="vfl-market-row"><label for="vfl-market-style">Стиль</label><select id="vfl-market-style"><option value="">Не важно</option>${TRANSFER_STYLES.map((label,i) => `<option value="${i+1}">${label}</option>`).join("")}</select></div>
+        <fieldset class="vfl-market-styles"><legend>Стиль</legend>${TRANSFER_STYLES.map((label,i) => `<label><input type="checkbox" id="vfl-market-style-${i+1}" value="${i+1}"> ${label}</label>`).join("")}</fieldset>
         <div class="vfl-market-row"><label for="vfl-market-sort">Сортировка</label><select id="vfl-market-sort"><option value="strength">По силе</option><option value="price">По цене</option><option value="specials">По спецвозможностям</option><option value="age">По возрасту</option></select></div>
         <small>Только первая страница, до 50 игроков. Сортировка применяется при нескольких страницах.</small>
         <div class="vfl-market-buttons"><button data-action="market">Найти игроков</button><button data-action="bids">Мои заявки</button></div>
