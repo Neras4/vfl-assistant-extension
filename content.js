@@ -3,7 +3,7 @@
   if (window.__VFL_ASSISTANT_V05__) return;
   window.__VFL_ASSISTANT_V05__ = true;
 
-  const VERSION = "0.5.10";
+  const VERSION = "0.5.11";
   const ORIGIN = location.origin;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -347,6 +347,18 @@
     const sort = option ? param(absUrl(option.getAttribute("value")), "sort") : doc.documentElement.innerHTML.match(/\bvar sort\s*=\s*(-?\d+)/)?.[1];
     const season = doc.querySelector('select[name="season"] option:checked')?.getAttribute('value') || doc.documentElement.innerHTML.match(/\bvar tek_season\s*=\s*(\d+)/)?.[1];
     return { sort: sort == null ? null : Number(sort), label: option ? clean(domText(option)) : null, season: season == null ? null : Number(season) };
+  }
+
+  function parseRosterSeasonStats(doc, roster) {
+    const scope = rosterScope(doc);
+    if (scope.sort !== 300 || (scope.label && scope.label !== "по всем турнирам") || !Number.isInteger(scope.season) || scope.season <= 0) {
+      throw new Error("Не удалось подтвердить статистику текущего сезона по всем турнирам.");
+    }
+    const fields = ["averageRating", "games", "goals", "assists", "yellowCards", "redCards"];
+    return { scope: { label: "по всем турнирам", season: scope.season, sort: 300 }, players: roster.players.map(p => {
+      const stats = p.selectedStats;
+      return { playerId: String(p.id), ...Object.fromEntries(fields.map(key => [key, Number.isFinite(stats?.[key]) && stats[key] >= 0 ? stats[key] : null])) };
+    }) };
   }
 
   function matchHistoryUrlForManager(doc, teamId) {
@@ -1326,16 +1338,37 @@
           current = null;
         }
         const player = transferRow(row, columns, sourceUrl);
-        if (player) { current = { ...player, auction, bidPrice: null, bidPercent: null, bidRaw: { price: null, percent: null } }; bids.push(current); continue; }
+        if (player) { current = { ...player, auction, bidType: null, bidPrice: null, bidPercent: null, preliminaryBidPrice: null, currentBidPrice: null, currentBidPercent: null, bidRaw: { price: null, percent: null } }; bids.push(current); continue; }
         if (cells.length === columns.width || [...row.querySelectorAll("a[href]")].some(a => /mng_orderplr\.php/.test(a.getAttribute("href") || ""))) current = null;
-        if (current && /Ваша заявка:/.test(clean(domText(row)))) {
+        if (current) {
+          const rowText = clean(domText(row));
+          const preliminary = /Пред(?:в)?\. заявка:/.test(rowText);
+          const active = /Ваша заявка:/.test(rowText);
+          if (!preliminary && !active) continue;
+          current.bidType = preliminary ? "preliminary" : "active";
           const input = [...row.querySelectorAll("input")].find(e => /^price_\d+$/.test(e.getAttribute("id") || ""));
-          const amount = clubNumber(input?.getAttribute("value") ?? "");
-          // Confirmed input is in thousands, followed by the literal 000 unit.
-          current.bidPrice = amount === null ? null : amount * 1000;
-          const percent = [...row.querySelectorAll("[id]")].find(e => /^percent_\d+$/.test(e.getAttribute("id") || ""));
-          current.bidPercent = clubNumber(clean(domText(percent)));
-          current.bidRaw = { price: input?.getAttribute("value") ?? null, percent: clean(domText(percent)) || null };
+          const ids = [...row.querySelectorAll("[id]")];
+          const percent = ids.find(e => /^percent_\d+$/.test(e.getAttribute("id") || ""));
+          const priceRaw = input?.getAttribute("value") ?? null;
+          const percentRaw = clean(domText(percent)) || null;
+          const amount = clubNumber(priceRaw ?? "");
+          // Both native price input and predv_price span are thousands,
+          // followed by a literal 000 outside the element (confirmed live).
+          if (preliminary) {
+            const previous = ids.find(e => /^predv_price_\d+$/.test(e.getAttribute("id") || ""));
+            const previousRaw = previous ? clean(domText(previous)) : null;
+            const previousAmount = clubNumber(previousRaw ?? "");
+            current.preliminaryBidPrice = previousAmount === null ? null : previousAmount * 1000;
+            if (/актуальная:/.test(rowText)) {
+              current.currentBidPrice = amount === null ? null : amount * 1000;
+              current.currentBidPercent = clubNumber(percentRaw ?? "");
+            }
+            current.bidRaw = { preliminaryPrice: previousRaw, currentPrice: /актуальная:/.test(rowText) ? priceRaw : null, currentPercent: /актуальная:/.test(rowText) ? percentRaw : null };
+          } else {
+            current.bidPrice = amount === null ? null : amount * 1000;
+            current.bidPercent = clubNumber(percentRaw ?? "");
+            current.bidRaw = { price: priceRaw, percent: percentRaw };
+          }
         }
       }
     }
@@ -1398,6 +1431,9 @@
     const currentDoc = await fetchDoc(currentUrl);
     if (teamIdFromManager(currentDoc) !== teamId) throw new Error("Активная команда изменилась во время сбора. Повторите сбор.");
     const roster = rosterCompact(currentDoc, teamId);
+    // sort=300 is already fetched for current state; retain its season stats
+    // before replacing selectedStats with the user's displayed scope.
+    const rosterSeasonStats = parseRosterSeasonStats(currentDoc, roster);
     const selectedMap = rosterPlayerMap(displayedRoster);
     roster.players = roster.players.map(p => ({ ...p, selectedStats: selectedMap.get(p.id)?.selectedStats ?? p.selectedStats }));
     roster.currentStateSourceUrl = currentUrl;
@@ -1421,6 +1457,7 @@
       managementIncluded: Boolean(management),
       sourceUrl: location.href,
       team: parseManagerCore(currentDoc),
+      rosterSeasonStats,
       roster,
       recentMatches
     };
